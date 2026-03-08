@@ -108,7 +108,7 @@ export async function stopDevRunnerSession(sessionId: string): Promise<DevSessio
 
 export async function applyAndPushToDevRunnerSession(input: {
   sessionId: string;
-  files: Record<string, string>;
+  files?: Record<string, string>;
   commitMessage?: string;
   runInstall?: boolean;
 }): Promise<{ session: DevSessionState; committed: boolean; commitSha?: string }> {
@@ -128,7 +128,7 @@ export async function applyAndPushToDevRunnerSession(input: {
   const payload = await parseJson<DevRunnerApplyResponse>(response);
   if (!response.ok || !payload?.session || typeof payload.committed !== "boolean") {
     throw new Error(
-      await buildUpstreamError(response, "Failed to apply and push changes from dev session", payload?.error)
+      await buildUpstreamError(response, "Failed to commit and push changes from dev session", payload?.error)
     );
   }
 

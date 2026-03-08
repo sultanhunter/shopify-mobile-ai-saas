@@ -417,50 +417,6 @@ async function persistPromptOutput(
     throw new Error("Project not found");
   }
 
-  if (updated.github.enabled && updated.github.owner && updated.github.repo && changedFiles.length > 0) {
-    const changedSubset: Record<string, string> = {};
-    for (const filePath of changedFiles) {
-      changedSubset[filePath] = refreshedFiles[filePath];
-    }
-
-    const commitResult = await commitFiles({
-      repository: {
-        owner: updated.github.owner,
-        repo: updated.github.repo,
-        repoUrl: updated.github.repoUrl ?? "",
-        defaultBranch: updated.github.defaultBranch ?? "main"
-      },
-      files: changedSubset,
-      commitMessage
-    });
-
-    if (commitResult.warnings.length > 0) {
-      run = {
-        ...run,
-        status: "completed_with_warnings"
-      };
-    }
-
-    updated =
-      (await updateProject(projectId, (current) => {
-        const runs = current.runs.map((existingRun) =>
-          existingRun.id === run.id ? run : existingRun
-        );
-
-        return {
-          ...current,
-          runs,
-          github: {
-            ...current.github,
-            lastCommitSha: commitResult.lastCommitSha,
-            lastCommitMessage: commitMessage,
-            lastSyncedAt: new Date().toISOString(),
-            error: commitResult.warnings.length > 0 ? commitResult.warnings.join(" | ") : undefined
-          }
-        };
-      })) ?? updated;
-  }
-
   return {
     project: toPublicProject(updated),
     run
@@ -496,7 +452,7 @@ export async function startProjectDevSession(
   const session = await startDevRunnerSession({
     projectId: project.id,
     repoUrl: project.github.repoUrl,
-    branch: project.github.defaultBranch ?? "main",
+    branch: "main",
     install: options?.install ?? true,
     useTunnel: options?.useTunnel ?? true
   });
@@ -661,12 +617,11 @@ export async function applyProjectDevSessionAndPush(
     throw new Error("No active dev session found for this project.");
   }
 
-  const commitMessage = params?.commitMessage?.trim() || project.runs[0]?.commitMessage || "feat: sync workspace files";
+  const commitMessage = params?.commitMessage?.trim() || project.runs[0]?.commitMessage || "feat: commit AI workspace changes";
   let result: { session: DevSessionState; committed: boolean; commitSha?: string };
   try {
     result = await applyAndPushToDevRunnerSession({
       sessionId: project.devSession.id,
-      files: project.files,
       commitMessage,
       runInstall: params?.runInstall ?? false
     });
@@ -674,7 +629,7 @@ export async function applyProjectDevSessionAndPush(
     if (isMissingDevSessionError(error)) {
       const clearedProject = await clearProjectDevSession(
         project.id,
-        "Dev session not found on runner during sync. Start a new session and retry."
+        "Dev session not found on runner during commit. Start a new session and retry."
       );
 
       return {
@@ -706,8 +661,8 @@ export async function applyProjectDevSessionAndPush(
       ...current.messages,
       createAssistantMessage(
         result.committed
-          ? `Dev session pushed commit ${result.commitSha ?? ""}.`.trim()
-          : "Dev session found no file changes to commit."
+          ? `Committed and pushed ${result.commitSha ?? "latest commit"}.`
+          : "No uncommitted AI changes found."
       )
     ]
   }));

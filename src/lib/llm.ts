@@ -237,13 +237,13 @@ async function generateWithOpenCodeServer(input: LlmProjectUpdateInput): Promise
   const response = await fetch(`${getAiServerBaseUrl()}/api/shopify-mobile/opencode/prompt`, {
     method: "POST",
     headers: buildAiServerHeaders(),
-    body: JSON.stringify({
-      projectId: input.project.id,
-      repoUrl: input.project.github.repoUrl,
-      branch: input.project.github.defaultBranch ?? "main",
-      prompt: input.prompt,
-      model: input.model,
-      thinking: input.thinking
+      body: JSON.stringify({
+        projectId: input.project.id,
+        repoUrl: input.project.github.repoUrl,
+        branch: "main",
+        prompt: input.prompt,
+        model: input.model,
+        thinking: input.thinking
     })
   });
 
@@ -295,7 +295,7 @@ export async function streamOpenCodeProjectUpdate(
     body: JSON.stringify({
       projectId: project.id,
       repoUrl: project.github.repoUrl,
-      branch: project.github.defaultBranch ?? "main",
+      branch: "main",
       prompt,
       model: options?.model,
       thinking: options?.thinking

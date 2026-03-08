@@ -21,7 +21,7 @@ const OPERATIONAL_MESSAGE_PREFIXES = [
   "Dev session stopped.",
   "Dev session no longer exists on runner.",
   "Dev session was already gone on runner",
-  "Dev session not found on runner during sync.",
+  "Dev session not found on runner during commit.",
   "Store connected:",
   "Expo scaffold warnings:"
 ];
@@ -52,7 +52,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const [isStartingDevSession, setIsStartingDevSession] = useState(false);
   const [isRefreshingDevSession, setIsRefreshingDevSession] = useState(false);
   const [isStoppingDevSession, setIsStoppingDevSession] = useState(false);
-  const [isSyncingDevSession, setIsSyncingDevSession] = useState(false);
+  const [isCommittingDevSession, setIsCommittingDevSession] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [devSessionFeedback, setDevSessionFeedback] = useState<string | null>(null);
   const [devSessionError, setDevSessionError] = useState<string | null>(null);
@@ -293,12 +293,12 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
     }
   }
 
-  async function applyAndPushToDevSession() {
-    if (!project.devSession?.id || isSyncingDevSession) {
+  async function commitDevSessionChanges() {
+    if (!project.devSession?.id || isCommittingDevSession) {
       return;
     }
 
-    setIsSyncingDevSession(true);
+    setIsCommittingDevSession(true);
     setDevSessionError(null);
     setDevSessionFeedback(null);
 
@@ -322,7 +322,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
       };
 
       if (!response.ok || !payload.project || typeof payload.committed !== "boolean") {
-        throw new Error(payload.error ?? "Failed to sync files to dev session.");
+        throw new Error(payload.error ?? "Failed to commit changes from dev session.");
       }
 
       setProject(payload.project);
@@ -332,9 +332,9 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
           : "No file changes to commit."
       );
     } catch (caught) {
-      setDevSessionError(caught instanceof Error ? caught.message : "Failed to sync files to dev session.");
+      setDevSessionError(caught instanceof Error ? caught.message : "Failed to commit changes from dev session.");
     } finally {
-      setIsSyncingDevSession(false);
+      setIsCommittingDevSession(false);
     }
   }
 
@@ -424,11 +424,11 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
             </button>
             <button
               className="button"
-              disabled={!devSession || isSyncingDevSession || devSession.status !== "ready"}
-              onClick={applyAndPushToDevSession}
+              disabled={!devSession || isCommittingDevSession}
+              onClick={commitDevSessionChanges}
               type="button"
             >
-              {isSyncingDevSession ? "Syncing..." : "Apply + Push"}
+              {isCommittingDevSession ? "Committing..." : "Commit Changes"}
             </button>
             <button
               className="button"

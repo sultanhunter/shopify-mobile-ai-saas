@@ -25,7 +25,7 @@ export async function POST(request: NextRequest, { params }: Params) {
     return NextResponse.json(result);
   } catch (caught) {
     return NextResponse.json(
-      { error: caught instanceof Error ? caught.message : "Failed to apply and push dev session updates." },
+      { error: caught instanceof Error ? caught.message : "Failed to commit dev session updates." },
       { status: 500 }
     );
   }
