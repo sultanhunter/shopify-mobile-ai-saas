@@ -70,6 +70,8 @@ cp .env.example .env.local
 - Set `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET`
 - Set `SHOPIFY_OAUTH_STATE_SECRET` and `SHOPIFY_TOKEN_ENCRYPTION_SECRET`
 - Set `GEMINI_API_KEY`
+- Set `APP_BASE_URL` to your public Next.js URL (used for Shopify OAuth redirect URL)
+- Set `MOBILE_BACKEND_BASE_URL` to the public URL/IP your Expo app should call for backend APIs
 - Set `AI_SERVER_BASE_URL` to your Node server (for example `http://localhost:3100`)
 - Set `AI_SERVER_TOKEN` to match `SHOPIFY_MOBILE_AI_SERVER_TOKEN` on the Node server
 - Set `EXPO_SCAFFOLD_SERVER_BASE_URL` if scaffold service runs on a different server
@@ -126,4 +128,4 @@ This keeps Vercel lightweight while long-running build/watch work stays on persi
 - `LLM_PROVIDER=vertex-server` is the recommended mode for Vercel deployments.
 - `LLM_PROVIDER=rule-based` is still available as a fallback provider for development.
 - Workspace preview supports a quick in-app preview and a Snack web preview mode.
-- Generated Expo project files are persisted in the project record and can be pushed to GitHub.
+- Generated Expo project files are source-of-truth in the server workspace repo and can be pushed to GitHub.

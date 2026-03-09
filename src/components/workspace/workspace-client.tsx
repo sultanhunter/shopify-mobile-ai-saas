@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { ChatMessage, DevSessionState, PublicProject } from "@/lib/models";
 
@@ -44,11 +45,14 @@ function formatLogLine(message: ChatMessage): string {
 }
 
 export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
+  const searchParams = useSearchParams();
   const [project, setProject] = useState<PublicProject>(initialProject);
   const [prompt, setPrompt] = useState("");
+  const [storeDomain, setStoreDomain] = useState(initialProject.store?.shopDomain ?? "");
   const [selectedModel, setSelectedModel] = useState(LLM_MODEL_OPTIONS[0]);
   const [selectedThinking, setSelectedThinking] = useState<ThinkingMode>("medium");
   const [isSendingPrompt, setIsSendingPrompt] = useState(false);
+  const [isConnectingStore, setIsConnectingStore] = useState(false);
   const [isStartingDevSession, setIsStartingDevSession] = useState(false);
   const [isRefreshingDevSession, setIsRefreshingDevSession] = useState(false);
   const [isStoppingDevSession, setIsStoppingDevSession] = useState(false);
@@ -58,11 +62,17 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const [devSessionError, setDevSessionError] = useState<string | null>(null);
   const [streamedResponse, setStreamedResponse] = useState("");
   const [streamEvents, setStreamEvents] = useState<string[]>([]);
-  const [selectedCodeFile, setSelectedCodeFile] = useState(initialProject.fileIndex[0] ?? "");
+  const [showCodeViewer, setShowCodeViewer] = useState(false);
+  const [repoFiles, setRepoFiles] = useState<string[]>(initialProject.fileIndex ?? []);
+  const [selectedCodeFile, setSelectedCodeFile] = useState("");
   const [isLoadingCode, setIsLoadingCode] = useState(false);
   const [codeError, setCodeError] = useState<string | null>(null);
   const [codeContent, setCodeContent] = useState("");
   const [isBinaryCode, setIsBinaryCode] = useState(false);
+
+  const oauthStatus = searchParams.get("shopify_oauth");
+  const oauthShop = searchParams.get("shop");
+  const oauthReason = searchParams.get("reason");
 
   const latestRun = project.runs[0];
   const devSession = project.devSession;
@@ -100,21 +110,43 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
   const branchName = project.github.defaultBranch ?? "main";
 
+  const refreshRepoFiles = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/projects/${project.id}/files`, { cache: "no-store" });
+      const payload = (await response.json().catch(() => null)) as { files?: string[]; error?: string } | null;
+      if (!response.ok || !Array.isArray(payload?.files)) {
+        return;
+      }
+
+      setRepoFiles(payload.files);
+    } catch {
+      // keep previous list
+    }
+  }, [project.id]);
+
   useEffect(() => {
-    if (project.fileIndex.length === 0) {
+    void refreshRepoFiles();
+  }, [refreshRepoFiles]);
+
+  useEffect(() => {
+    if (!showCodeViewer) {
+      return;
+    }
+
+    if (repoFiles.length === 0) {
       if (selectedCodeFile) {
         setSelectedCodeFile("");
       }
       return;
     }
 
-    if (!selectedCodeFile || !project.fileIndex.includes(selectedCodeFile)) {
-      setSelectedCodeFile(project.fileIndex[0]);
+    if (!selectedCodeFile || !repoFiles.includes(selectedCodeFile)) {
+      setSelectedCodeFile(repoFiles[0]);
     }
-  }, [project.fileIndex, selectedCodeFile]);
+  }, [repoFiles, selectedCodeFile, showCodeViewer]);
 
   useEffect(() => {
-    if (!selectedCodeFile) {
+    if (!showCodeViewer || !selectedCodeFile) {
       setCodeContent("");
       setCodeError(null);
       setIsBinaryCode(false);
@@ -166,7 +198,33 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
     return () => {
       cancelled = true;
     };
-  }, [project.id, selectedCodeFile]);
+  }, [project.id, selectedCodeFile, showCodeViewer]);
+
+  async function connectStoreWithOAuth() {
+    const normalizedDomain = storeDomain.trim();
+    if (!normalizedDomain || isConnectingStore) {
+      return;
+    }
+
+    setIsConnectingStore(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/shopify/auth?shop=${encodeURIComponent(normalizedDomain)}&projectId=${encodeURIComponent(project.id)}`
+      );
+
+      const payload = (await response.json()) as { authUrl?: string; error?: string };
+      if (!response.ok || !payload.authUrl) {
+        throw new Error(payload.error ?? "Failed to start Shopify OAuth.");
+      }
+
+      window.location.assign(payload.authUrl);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to start Shopify OAuth.");
+      setIsConnectingStore(false);
+    }
+  }
 
   const refreshDevSession = useCallback(
     async (withSpinner = true) => {
@@ -299,6 +357,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
       }
 
       setPrompt("");
+      void refreshRepoFiles();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to run prompt.");
     } finally {
@@ -334,6 +393,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
       setProject(payload.project);
       setDevSessionFeedback("Dev session started. Waiting for preview URL...");
+      void refreshRepoFiles();
     } catch (caught) {
       setDevSessionError(caught instanceof Error ? caught.message : "Failed to start dev session.");
     } finally {
@@ -361,6 +421,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
       setProject(payload.project);
       setDevSessionFeedback("Dev session stopped.");
+      void refreshRepoFiles();
     } catch (caught) {
       setDevSessionError(caught instanceof Error ? caught.message : "Failed to stop dev session.");
     } finally {
@@ -406,6 +467,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
           ? `Pushed ${payload.commitSha ? payload.commitSha.slice(0, 12) : "latest updates"}.`
           : "No file changes to commit."
       );
+      void refreshRepoFiles();
     } catch (caught) {
       setDevSessionError(caught instanceof Error ? caught.message : "Failed to commit changes from dev session.");
     } finally {
@@ -426,6 +488,30 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
           </Link>
           <h1 className="panel-title">{project.name}</h1>
           <p className="panel-subtitle">AI chat with streaming responses via OpenCode.</p>
+        </div>
+
+        <div className="connect-row">
+          <label className="field-label" htmlFor="storeDomainInput">
+            Shopify Store Domain
+          </label>
+          <input
+            id="storeDomainInput"
+            className="text-input"
+            placeholder="your-shop.myshopify.com"
+            value={storeDomain}
+            onChange={(event) => setStoreDomain(event.target.value)}
+          />
+          <button className="button" disabled={isConnectingStore} onClick={connectStoreWithOAuth} type="button">
+            {isConnectingStore ? "Redirecting..." : "Connect via OAuth"}
+          </button>
+          {oauthStatus === "success" ? (
+            <p className="meta-line">Shopify OAuth connected{oauthShop ? `: ${oauthShop}` : ""}.</p>
+          ) : null}
+          {oauthStatus === "error" ? (
+            <p className="error-text">
+              Shopify OAuth failed{oauthReason ? ` (${oauthReason.replaceAll("_", " ")})` : ""}. Try again.
+            </p>
+          ) : null}
         </div>
 
         <div className="chat-main">
@@ -514,6 +600,14 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
               {isStoppingDevSession ? "Stopping..." : "Stop"}
             </button>
           </div>
+          <button
+            className="button"
+            type="button"
+            disabled={repoFiles.length === 0}
+            onClick={() => setShowCodeViewer((current) => !current)}
+          >
+            {showCodeViewer ? "Hide Code" : "View Code"}
+          </button>
           {devSessionFeedback ? <p className="meta-line">{devSessionFeedback}</p> : null}
           {devSessionError ? <p className="error-text">{devSessionError}</p> : null}
           {devSession?.error ? <p className="error-text">Runner: {devSession.error}</p> : null}
@@ -524,31 +618,33 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
           <div className="log-console">{devSession?.logs?.length ? devSession.logs.join("\n") : "No dev logs yet."}</div>
         </div>
 
-        <div className="run-meta">
-          <h3>Repository Code</h3>
-          <p className="meta-line">Branch: {branchName}</p>
-          <select
-            className="text-input"
-            value={selectedCodeFile}
-            onChange={(event) => setSelectedCodeFile(event.target.value)}
-            disabled={project.fileIndex.length === 0}
-          >
-            {project.fileIndex.length === 0 ? <option value="">No files available</option> : null}
-            {project.fileIndex.map((filePath) => (
-              <option key={filePath} value={filePath}>
-                {filePath}
-              </option>
-            ))}
-          </select>
-          {codeError ? <p className="error-text">{codeError}</p> : null}
-          <div className="log-console code-console">
-            {isLoadingCode
-              ? "Loading file..."
-              : isBinaryCode
-                ? "Binary file preview is not supported in viewer."
-                : codeContent || "No file selected."}
+        {showCodeViewer ? (
+          <div className="run-meta">
+            <h3>Repository Code</h3>
+            <p className="meta-line">Branch: {branchName}</p>
+            <select
+              className="text-input"
+              value={selectedCodeFile}
+              onChange={(event) => setSelectedCodeFile(event.target.value)}
+              disabled={repoFiles.length === 0}
+            >
+              {repoFiles.length === 0 ? <option value="">No files available</option> : null}
+              {repoFiles.map((filePath) => (
+                <option key={filePath} value={filePath}>
+                  {filePath}
+                </option>
+              ))}
+            </select>
+            {codeError ? <p className="error-text">{codeError}</p> : null}
+            <div className="log-console code-console">
+              {isLoadingCode
+                ? "Loading file..."
+                : isBinaryCode
+                  ? "Binary file preview is not supported in viewer."
+                  : codeContent || "No file selected."}
+            </div>
           </div>
-        </div>
+        ) : null}
 
         <div className="preview-stage">
           <div className="preview-canvas">

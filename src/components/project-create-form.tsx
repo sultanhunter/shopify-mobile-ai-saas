@@ -94,8 +94,36 @@ export function ProjectCreateForm() {
 
       const taskId = payload.task.id;
       setTaskStatus("Running workspace setup");
+      const startedAtMs = Date.now();
+      const maxWaitMs = 10 * 60 * 1000;
+      const fallbackOpenAfterMs = 20 * 1000;
+
+      async function resolveProjectIdFallbackByName(name: string): Promise<string | null> {
+        try {
+          const response = await fetch("/api/projects", { cache: "no-store" });
+          const payload = (await response.json().catch(() => null)) as
+            | {
+                projects?: Array<{ id?: string; name?: string }>;
+              }
+            | null;
+
+          if (!response.ok || !Array.isArray(payload?.projects)) {
+            return null;
+          }
+
+          const normalized = name.trim().toLowerCase();
+          const match = payload.projects.find((project) => project.name?.trim().toLowerCase() === normalized);
+          return match?.id?.trim() || null;
+        } catch {
+          return null;
+        }
+      }
 
       while (true) {
+        if (Date.now() - startedAtMs > maxWaitMs) {
+          throw new Error("Workspace task is taking too long. Refresh to check latest status.");
+        }
+
         await new Promise((resolve) => setTimeout(resolve, 1500));
 
         const taskResponse = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
@@ -118,15 +146,28 @@ export function ProjectCreateForm() {
           throw new Error(taskPayload?.error ?? "Failed to check workspace task status.");
         }
 
-        const status = taskPayload.task.status ?? "running";
+        const status = String(taskPayload.task.status ?? "running").trim().toLowerCase();
         setTaskStatus(status === "completed" ? "Completed" : status === "failed" ? "Failed" : "Running workspace setup");
 
+        const result = taskPayload.task.result;
+        const projectId =
+          taskPayload.task.projectId ??
+          (result?.projectId ?? (typeof result === "object" && result ? (result as { project_id?: string }).project_id : undefined));
+
         if (status === "completed") {
-          const projectId = taskPayload.task.projectId ?? taskPayload.task.result?.projectId;
-          if (!projectId) {
-            throw new Error("Workspace task completed without project id.");
+          const resolvedProjectId = projectId || (await resolveProjectIdFallbackByName(trimmed));
+          if (!resolvedProjectId) {
+            throw new Error("Workspace task completed but project id was not available yet.");
           }
 
+          setTaskStatus("Opening workspace");
+          router.push(`/projects/${resolvedProjectId}`);
+          router.refresh();
+          return;
+        }
+
+        if (projectId && Date.now() - startedAtMs > fallbackOpenAfterMs) {
+          setTaskStatus("Opening workspace");
           router.push(`/projects/${projectId}`);
           router.refresh();
           return;

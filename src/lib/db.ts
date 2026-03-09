@@ -110,6 +110,14 @@ function normalizeProject(value: unknown): Project | null {
     return null;
   }
 
+  const anyProject = project as unknown as { fileIndex?: unknown; files?: unknown };
+  if (!Array.isArray(anyProject.fileIndex)) {
+    const legacyFiles = anyProject.files && typeof anyProject.files === "object"
+      ? Object.keys(anyProject.files as Record<string, unknown>).sort((a, b) => a.localeCompare(b))
+      : [];
+    project.fileIndex = legacyFiles;
+  }
+
   return project;
 }
 

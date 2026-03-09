@@ -4,6 +4,7 @@ interface AiOutput {
   preview: PreviewModel;
   summary: string;
   files?: Record<string, string>;
+  changedFiles?: string[];
   opencodeSession?: OpencodeSessionState;
 }
 

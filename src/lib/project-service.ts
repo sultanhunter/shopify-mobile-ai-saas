@@ -1,32 +1,36 @@
 import { randomUUID } from "node:crypto";
-import { createProject, getProject, listProjects, updateProject } from "@/lib/db";
+import { getProject, listProjects, updateProject } from "@/lib/db";
 import {
+  applyFilesToProjectRepo,
   applyAndPushToDevRunnerSession,
   getDevRunnerSessionStatus,
+  listProjectRepoFiles,
   startDevRunnerSession,
   stopDevRunnerSession
 } from "@/lib/dev-runner";
-import { createExpoScaffoldFiles } from "@/lib/expo-scaffold";
-import { createInitialPreview, renderExpoFiles } from "@/lib/expo-template";
-import { renderShopifyBaselineFiles } from "@/lib/shopify-baseline";
-import { commitFiles, ensureProjectRepository, isGithubConfigured } from "@/lib/github";
+import { renderShopifyBaselineFiles, validateShopifyBaselineFiles } from "@/lib/shopify-baseline";
 import { generateProjectUpdate } from "@/lib/llm";
 import { AiOutput } from "@/lib/ai-engine";
 import { AiRun, ChatMessage, DevSessionState, Project, PublicProject } from "@/lib/models";
 import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 
 function getBackendBaseUrl() {
-  return process.env.APP_BASE_URL ?? "http://localhost:3000";
-}
+  const mobileBackendBaseUrl = process.env.MOBILE_BACKEND_BASE_URL?.trim();
+  if (mobileBackendBaseUrl) {
+    return mobileBackendBaseUrl.replace(/\/$/, "");
+  }
 
-function normalizeExpoSdkTarget(value?: string): string {
-  const raw = (value ?? "55").trim().toLowerCase();
-  const normalized = raw
-    .replace(/^sdk[-\s]?/i, "")
-    .replace(/^v/i, "")
-    .replace(/[^0-9]/g, "");
+  const appBaseUrl = process.env.APP_BASE_URL?.trim();
+  if (appBaseUrl) {
+    return appBaseUrl.replace(/\/$/, "");
+  }
 
-  return normalized || "55";
+  const aiServerBaseUrl = process.env.AI_SERVER_BASE_URL?.trim();
+  if (aiServerBaseUrl) {
+    return aiServerBaseUrl.replace(/\/$/, "");
+  }
+
+  return "http://localhost:3000";
 }
 
 function createAssistantMessage(content: string, runId?: string): ChatMessage {
@@ -62,7 +66,7 @@ function toPublicProject(project: Project): PublicProject {
         }
       : undefined,
     github: project.github,
-    fileIndex: Object.keys(project.files).sort()
+    fileIndex: [...(project.fileIndex ?? [])]
   };
 }
 
@@ -112,11 +116,12 @@ function buildCommitMessage(prefix: "chore" | "feat", summary: string): string {
   return `${prefix}(ai): ${compact}`;
 }
 
-function mergeGeneratedFiles(baseFiles: Record<string, string>, generatedFiles: Record<string, string>) {
-  return {
-    ...baseFiles,
-    ...generatedFiles
-  };
+async function resolveRepoFileIndex(projectId: string, fallback: string[]): Promise<string[]> {
+  try {
+    return await listProjectRepoFiles(projectId);
+  } catch {
+    return fallback;
+  }
 }
 
 export async function listPublicProjects(): Promise<PublicProject[]> {
@@ -130,109 +135,9 @@ export async function getPublicProject(projectId: string): Promise<PublicProject
 }
 
 export async function createNewProject(projectName: string, sdkTarget?: string): Promise<PublicProject> {
-  const trimmedName = projectName.trim();
-  if (!trimmedName) {
-    throw new Error("Project name is required");
-  }
-
-  const now = new Date().toISOString();
-  const projectId = randomUUID();
-  const expoSdkTarget = normalizeExpoSdkTarget(sdkTarget);
-  const initialPreview = createInitialPreview(trimmedName);
-  const scaffold = await createExpoScaffoldFiles(trimmedName, expoSdkTarget);
-
-  const generatedFiles = renderExpoFiles({
-    projectName: trimmedName,
-    projectId,
-    preview: initialPreview,
-    backendBaseUrl: getBackendBaseUrl()
-  });
-
-  const initialFiles = Object.keys(scaffold.files).length > 0 ? scaffold.files : generatedFiles;
-
-  const systemMessage: ChatMessage = {
-    id: randomUUID(),
-    role: "system",
-    content:
-      "Project initialized. This workspace will generate and update an Expo mobile app connected to your Shopify store via backend APIs.",
-    createdAt: now
-  };
-
-  const scaffoldWarningsMessage = scaffold.warnings.length > 0
-    ? createAssistantMessage(`Expo scaffold warnings: ${scaffold.warnings.join(" | ")}`)
-    : null;
-
-  let project: Project = {
-    id: projectId,
-    name: trimmedName,
-    createdAt: now,
-    updatedAt: now,
-    expoSdk: scaffold.sdk ?? expoSdkTarget,
-    preview: initialPreview,
-    files: initialFiles,
-    messages: [
-      systemMessage,
-      createAssistantMessage("Ready. Prompt me with mobile app requirements for your Shopify store."),
-      ...(scaffoldWarningsMessage ? [scaffoldWarningsMessage] : [])
-    ],
-    runs: [],
-    github: {
-      enabled: false,
-      error: "GitHub sync not attempted yet."
-    }
-  };
-
-  await createProject(project);
-
-  if (!isGithubConfigured()) {
-    project = {
-      ...project,
-      github: {
-        enabled: false,
-        error: "Set GITHUB_TOKEN to enable automatic repository creation and commits."
-      }
-    };
-
-    const updated = await updateProject(project.id, () => project);
-    return toPublicProject(updated ?? project);
-  }
-
-  const repoResult = await ensureProjectRepository(project.name, project.id);
-  project.github = {
-    ...repoResult.github,
-    error:
-      repoResult.github.enabled || repoResult.warnings.length === 0
-        ? repoResult.github.error
-        : repoResult.warnings.join(" | ")
-  };
-
-  if (repoResult.github.enabled && repoResult.github.owner && repoResult.github.repo) {
-    const commitMessage = buildCommitMessage("chore", "initialize Expo app scaffold");
-    const commitResult = await commitFiles({
-      repository: {
-        owner: repoResult.github.owner,
-        repo: repoResult.github.repo,
-        repoUrl: repoResult.github.repoUrl ?? "",
-        defaultBranch: repoResult.github.defaultBranch ?? "main"
-      },
-      files: project.files,
-      commitMessage
-    });
-
-    project.github = {
-      ...project.github,
-      lastCommitSha: commitResult.lastCommitSha,
-      lastCommitMessage: commitMessage,
-      lastSyncedAt: new Date().toISOString(),
-      error:
-        commitResult.warnings.length > 0
-          ? commitResult.warnings.join(" | ")
-          : undefined
-    };
-  }
-
-  const saved = await updateProject(project.id, () => project);
-  return toPublicProject(saved ?? project);
+  throw new Error(
+    `Direct project creation is disabled. Use the workspace creation task endpoint instead (name=${projectName}, sdk=${sdkTarget ?? "55"}).`
+  );
 }
 
 export async function connectStoreToProject(params: {
@@ -256,31 +161,6 @@ export async function connectStoreToProject(params: {
       ? encryptSecret(params.accessToken)
       : current.store?.accessTokenEncrypted;
 
-    const files = renderExpoFiles({
-      projectName: current.name,
-      projectId: current.id,
-      preview: current.preview,
-      storeDomain: domain,
-      backendBaseUrl: getBackendBaseUrl()
-    });
-
-    const baselineFiles = renderShopifyBaselineFiles({
-      projectId: current.id,
-      projectName: current.name,
-      shopDomain: domain,
-      backendBaseUrl: getBackendBaseUrl(),
-      brandColor: current.preview.primaryColor
-    });
-
-    const mergedFiles = {
-      ...mergeGeneratedFiles(current.files, files),
-      ...baselineFiles
-    };
-
-    const message = createAssistantMessage(
-      `Store connected: ${domain}. Shopify baseline commerce screens (home, products, cart, checkout) are now applied.`
-    );
-
     return {
       ...current,
       updatedAt: now,
@@ -290,8 +170,7 @@ export async function connectStoreToProject(params: {
         accessTokenEncrypted: encryptedAccessToken,
         connectedAt: now
       },
-      files: mergedFiles,
-      messages: [...current.messages, message]
+      messages: [...current.messages, createAssistantMessage(`Store connected: ${domain}. Applying Shopify baseline...`)]
     };
   });
 
@@ -299,47 +178,34 @@ export async function connectStoreToProject(params: {
     throw new Error("Project not found");
   }
 
-  if (connected.github.enabled && connected.github.owner && connected.github.repo) {
-    const commitMessage = buildCommitMessage("feat", `connect Shopify store ${domain}`);
-    const changedFiles = Object.keys(connected.files).filter(
-      (filePath) => connected.files[filePath] !== project.files[filePath]
-    );
+  const baselineFiles = renderShopifyBaselineFiles({
+    projectId: connected.id,
+    projectName: connected.name,
+    shopDomain: domain,
+    backendBaseUrl: getBackendBaseUrl(),
+    brandColor: connected.preview.primaryColor
+  });
 
-    if (changedFiles.length === 0) {
-      return toPublicProject(connected);
-    }
+  validateShopifyBaselineFiles(baselineFiles);
 
-    const changedSubset: Record<string, string> = {};
-    for (const filePath of changedFiles) {
-      changedSubset[filePath] = connected.files[filePath];
-    }
+  const applied = await applyFilesToProjectRepo({
+    projectId: connected.id,
+    files: baselineFiles
+  });
 
-    const commitResult = await commitFiles({
-      repository: {
-        owner: connected.github.owner,
-        repo: connected.github.repo,
-        repoUrl: connected.github.repoUrl ?? "",
-        defaultBranch: connected.github.defaultBranch ?? "main"
-      },
-      files: changedSubset,
-      commitMessage
-    });
+  const finalized = await updateProject(connected.id, (current) => ({
+    ...current,
+    updatedAt: new Date().toISOString(),
+    fileIndex: applied.fileIndex,
+    messages: [
+      ...current.messages,
+      createAssistantMessage(
+        `Store connected: ${domain}. Shopify baseline commerce screens (home, products, cart, checkout) are now applied locally.`
+      )
+    ]
+  }));
 
-    const finalized = await updateProject(connected.id, (current) => ({
-      ...current,
-      github: {
-        ...current.github,
-        lastCommitSha: commitResult.lastCommitSha,
-        lastCommitMessage: commitMessage,
-        lastSyncedAt: new Date().toISOString(),
-        error: commitResult.warnings.length > 0 ? commitResult.warnings.join(" | ") : undefined
-      }
-    }));
-
-    return toPublicProject(finalized ?? connected);
-  }
-
-  return toPublicProject(connected);
+  return toPublicProject(finalized ?? connected);
 }
 
 export async function runPrompt(
@@ -388,19 +254,7 @@ async function persistPromptOutput(
   trimmedPrompt: string,
   aiOutput: AiOutput
 ): Promise<{ project: PublicProject; run: AiRun }> {
-  const generatedFiles = aiOutput.files ?? renderExpoFiles({
-    projectName: project.name,
-    projectId: project.id,
-    preview: aiOutput.preview,
-    storeDomain: project.store?.shopDomain,
-    backendBaseUrl: getBackendBaseUrl()
-  });
-
-  const refreshedFiles = mergeGeneratedFiles(project.files, generatedFiles);
-
-  const changedFiles = Object.keys(generatedFiles).filter(
-    (filePath) => refreshedFiles[filePath] !== project.files[filePath]
-  );
+  const changedFiles = aiOutput.changedFiles ?? [];
 
   const runId = randomUUID();
   const createdAt = new Date().toISOString();
@@ -424,15 +278,17 @@ async function persistPromptOutput(
   };
 
   const assistantMessage = createAssistantMessage(
-    `${aiOutput.summary}. Updated ${changedFiles.length} file(s) in the Expo app workspace.`,
+    `${aiOutput.summary}. Updated ${changedFiles.length} file(s) in the workspace repository.`,
     runId
   );
+
+  const latestFileIndex = await resolveRepoFileIndex(projectId, project.fileIndex ?? []);
 
   let updated = await updateProject(projectId, (current) => ({
     ...current,
     updatedAt: createdAt,
     preview: aiOutput.preview,
-    files: refreshedFiles,
+    fileIndex: latestFileIndex,
     opencodeSession: aiOutput.opencodeSession ?? current.opencodeSession,
     runs: [run, ...current.runs].slice(0, 30),
     messages: [...current.messages, userMessage, assistantMessage]
@@ -668,10 +524,12 @@ export async function applyProjectDevSessionAndPush(
   }
 
   const normalized = normalizeDevSessionState(result.session);
+  const latestFileIndex = await resolveRepoFileIndex(project.id, project.fileIndex ?? []);
   const updated = await updateProject(project.id, (current) => ({
     ...current,
     updatedAt: new Date().toISOString(),
     devSession: normalized,
+    fileIndex: latestFileIndex,
     github:
       result.committed && result.commitSha
         ? {

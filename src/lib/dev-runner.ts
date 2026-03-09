@@ -12,6 +12,24 @@ interface DevRunnerApplyResponse {
   error?: string;
 }
 
+interface DevRunnerRepoFilesResponse {
+  files?: string[];
+  error?: string;
+}
+
+interface DevRunnerRepoFileResponse {
+  path?: string;
+  isBinary?: boolean;
+  content?: string;
+  error?: string;
+}
+
+interface DevRunnerRepoApplyResponse {
+  written?: string[];
+  fileIndex?: string[];
+  error?: string;
+}
+
 function getDevRunnerBaseUrl(): string {
   const baseUrl = process.env.AI_SERVER_BASE_URL?.trim();
   if (!baseUrl) {
@@ -136,5 +154,73 @@ export async function applyAndPushToDevRunnerSession(input: {
     session: payload.session,
     committed: payload.committed,
     commitSha: payload.commitSha
+  };
+}
+
+export async function listProjectRepoFiles(projectId: string): Promise<string[]> {
+  const response = await fetch(
+    `${getDevRunnerBaseUrl()}/api/shopify-mobile/repo/${encodeURIComponent(projectId)}/files`,
+    {
+      method: "GET",
+      headers: buildHeaders(),
+      cache: "no-store"
+    }
+  );
+
+  const payload = await parseJson<DevRunnerRepoFilesResponse>(response);
+  if (!response.ok || !Array.isArray(payload?.files)) {
+    throw new Error(await buildUpstreamError(response, "Failed to list repository files", payload?.error));
+  }
+
+  return payload.files;
+}
+
+export async function readProjectRepoFile(projectId: string, filePath: string): Promise<{
+  path: string;
+  isBinary: boolean;
+  content: string;
+}> {
+  const response = await fetch(
+    `${getDevRunnerBaseUrl()}/api/shopify-mobile/repo/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(filePath)}`,
+    {
+      method: "GET",
+      headers: buildHeaders(),
+      cache: "no-store"
+    }
+  );
+
+  const payload = await parseJson<DevRunnerRepoFileResponse>(response);
+  if (!response.ok || !payload?.path || typeof payload.isBinary !== "boolean" || typeof payload.content !== "string") {
+    throw new Error(await buildUpstreamError(response, "Failed to read repository file", payload?.error));
+  }
+
+  return {
+    path: payload.path,
+    isBinary: payload.isBinary,
+    content: payload.content,
+  };
+}
+
+export async function applyFilesToProjectRepo(input: {
+  projectId: string;
+  files: Record<string, string>;
+}): Promise<{ written: string[]; fileIndex: string[] }> {
+  const response = await fetch(
+    `${getDevRunnerBaseUrl()}/api/shopify-mobile/repo/${encodeURIComponent(input.projectId)}/apply-files`,
+    {
+      method: "POST",
+      headers: buildHeaders(),
+      body: JSON.stringify({ files: input.files })
+    }
+  );
+
+  const payload = await parseJson<DevRunnerRepoApplyResponse>(response);
+  if (!response.ok || !Array.isArray(payload?.written) || !Array.isArray(payload?.fileIndex)) {
+    throw new Error(await buildUpstreamError(response, "Failed to apply repository files", payload?.error));
+  }
+
+  return {
+    written: payload.written,
+    fileIndex: payload.fileIndex,
   };
 }

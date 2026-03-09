@@ -85,7 +85,7 @@ export interface Project {
   updatedAt: string;
   expoSdk?: string;
   preview: PreviewModel;
-  files: Record<string, string>;
+  fileIndex: string[];
   messages: ChatMessage[];
   runs: AiRun[];
   devSession?: DevSessionState;

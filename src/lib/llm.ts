@@ -171,6 +171,7 @@ interface OpenCodeServerResponse {
     repoPath?: unknown;
     agent?: unknown;
     files?: unknown;
+    changedFiles?: unknown;
   };
   error?: string;
 }
@@ -229,6 +230,14 @@ function asStringRecord(value: unknown): Record<string, string> {
   return output;
 }
 
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
 async function generateWithOpenCodeServer(input: LlmProjectUpdateInput): Promise<AiOutput> {
   if (!input.project.github.enabled || !input.project.github.repoUrl) {
     throw new Error("GitHub repository is required before using OpenCode prompt sessions.");
@@ -275,6 +284,7 @@ async function generateWithOpenCodeServer(input: LlmProjectUpdateInput): Promise
     preview: input.project.preview,
     summary,
     files: asStringRecord(payload.result.files),
+    changedFiles: asStringArray(payload.result.changedFiles),
     opencodeSession
   };
 }
@@ -395,6 +405,7 @@ export async function streamOpenCodeProjectUpdate(
     preview: project.preview,
     summary,
     files: asStringRecord(finalResult.files),
+    changedFiles: asStringArray(finalResult.changedFiles),
     opencodeSession
   };
 }

@@ -383,7 +383,7 @@ function renderShopifyApi(): string {
 import { ProductDetail, ProductSummary } from "./types";
 
 function apiUrl(path: string): string {
-  const root = storeConfig.backendBaseUrl.replace(/\/$/, "");
+  const root = storeConfig.backendBaseUrl.replace(/\\/$/, "");
   return root + path;
 }
 
@@ -415,6 +415,38 @@ export async function fetchProductByHandle(handle: string): Promise<ProductDetai
   return payload.product;
 }
 `;
+}
+
+const REQUIRED_BASELINE_FILES = [
+  "app/_layout.tsx",
+  "app/(tabs)/index.tsx",
+  "app/(tabs)/search.tsx",
+  "app/(tabs)/cart.tsx",
+  "app/product/[handle].tsx",
+  "src/features/shopify/api.ts",
+  "src/features/shopify/shopify-provider.tsx",
+  "src/features/cart/cart-context.tsx"
+];
+
+const FORBIDDEN_PATTERNS = [
+  "replace(//$/",
+  "undefined (reading 'body')"
+];
+
+export function validateShopifyBaselineFiles(files: Record<string, string>): void {
+  for (const requiredPath of REQUIRED_BASELINE_FILES) {
+    if (typeof files[requiredPath] !== "string" || files[requiredPath].trim().length === 0) {
+      throw new Error(`Shopify baseline validation failed: missing required file ${requiredPath}`);
+    }
+  }
+
+  for (const [filePath, content] of Object.entries(files)) {
+    for (const pattern of FORBIDDEN_PATTERNS) {
+      if (content.includes(pattern)) {
+        throw new Error(`Shopify baseline validation failed: forbidden pattern \"${pattern}\" found in ${filePath}`);
+      }
+    }
+  }
 }
 
 function renderCatalogHook(): string {
