@@ -8,6 +8,32 @@ interface ProjectRow {
   updated_at: string;
 }
 
+export type WorkspaceTaskStatus = "queued" | "running" | "completed" | "failed";
+
+interface WorkspaceTaskRow {
+  id: string;
+  type: string;
+  status: WorkspaceTaskStatus;
+  project_id: string | null;
+  payload: Record<string, unknown> | null;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceTask {
+  id: string;
+  type: string;
+  status: WorkspaceTaskStatus;
+  projectId?: string;
+  payload?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 let cachedClient: SupabaseClient | null = null;
 let writeChain = Promise.resolve();
 
@@ -33,6 +59,10 @@ function getProjectsTableName(): string {
   return process.env.SUPABASE_PROJECTS_TABLE?.trim() || "projects";
 }
 
+function getTasksTableName(): string {
+  return process.env.SUPABASE_TASKS_TABLE?.trim() || "tasks";
+}
+
 function getSupabaseClient(): SupabaseClient {
   if (cachedClient) {
     return cachedClient;
@@ -50,6 +80,24 @@ function getSupabaseClient(): SupabaseClient {
 
 function sortProjects(projects: Project[]): Project[] {
   return projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function normalizeTask(row: WorkspaceTaskRow | null): WorkspaceTask | undefined {
+  if (!row) {
+    return undefined;
+  }
+
+  return {
+    id: row.id,
+    type: row.type,
+    status: row.status,
+    projectId: row.project_id ?? undefined,
+    payload: row.payload ?? undefined,
+    result: row.result ?? undefined,
+    error: row.error ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
 }
 
 function normalizeProject(value: unknown): Project | null {
@@ -159,4 +207,18 @@ export async function updateProject(
 
   await writeChain;
   return updatedProject;
+}
+
+export async function getWorkspaceTask(taskId: string): Promise<WorkspaceTask | undefined> {
+  const { data, error } = await getSupabaseClient()
+    .from(getTasksTableName())
+    .select("id, type, status, project_id, payload, result, error, created_at, updated_at")
+    .eq("id", taskId)
+    .maybeSingle<WorkspaceTaskRow>();
+
+  if (error) {
+    throw new Error(`Supabase task fetch failed: ${error.message}`);
+  }
+
+  return normalizeTask(data ?? null);
 }

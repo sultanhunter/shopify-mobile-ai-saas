@@ -434,6 +434,10 @@ a {
   white-space: pre-wrap;
 }
 
+.code-console {
+  max-height: 360px;
+}
+
 .live-stream-console {
   flex: 1;
   min-height: 0;

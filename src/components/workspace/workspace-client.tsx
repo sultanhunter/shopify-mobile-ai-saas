@@ -58,6 +58,11 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const [devSessionError, setDevSessionError] = useState<string | null>(null);
   const [streamedResponse, setStreamedResponse] = useState("");
   const [streamEvents, setStreamEvents] = useState<string[]>([]);
+  const [selectedCodeFile, setSelectedCodeFile] = useState(initialProject.fileIndex[0] ?? "");
+  const [isLoadingCode, setIsLoadingCode] = useState(false);
+  const [codeError, setCodeError] = useState<string | null>(null);
+  const [codeContent, setCodeContent] = useState("");
+  const [isBinaryCode, setIsBinaryCode] = useState(false);
 
   const latestRun = project.runs[0];
   const devSession = project.devSession;
@@ -92,6 +97,76 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
     return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(devSession.expoUrl)}`;
   }, [devSession?.expoUrl, devSession?.status]);
+
+  const branchName = project.github.defaultBranch ?? "main";
+
+  useEffect(() => {
+    if (project.fileIndex.length === 0) {
+      if (selectedCodeFile) {
+        setSelectedCodeFile("");
+      }
+      return;
+    }
+
+    if (!selectedCodeFile || !project.fileIndex.includes(selectedCodeFile)) {
+      setSelectedCodeFile(project.fileIndex[0]);
+    }
+  }, [project.fileIndex, selectedCodeFile]);
+
+  useEffect(() => {
+    if (!selectedCodeFile) {
+      setCodeContent("");
+      setCodeError(null);
+      setIsBinaryCode(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      setIsLoadingCode(true);
+      setCodeError(null);
+
+      try {
+        const response = await fetch(`/api/projects/${project.id}/code?path=${encodeURIComponent(selectedCodeFile)}`, {
+          cache: "no-store"
+        });
+
+        const payload = (await response.json()) as {
+          content?: string;
+          isBinary?: boolean;
+          error?: string;
+        };
+
+        if (!response.ok) {
+          throw new Error(payload.error ?? "Failed to load file content.");
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setIsBinaryCode(Boolean(payload.isBinary));
+        setCodeContent(typeof payload.content === "string" ? payload.content : "");
+      } catch (caught) {
+        if (cancelled) {
+          return;
+        }
+
+        setCodeError(caught instanceof Error ? caught.message : "Failed to load file content.");
+        setCodeContent("");
+        setIsBinaryCode(false);
+      } finally {
+        if (!cancelled) {
+          setIsLoadingCode(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id, selectedCodeFile]);
 
   const refreshDevSession = useCallback(
     async (withSpinner = true) => {
@@ -447,6 +522,32 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
             <div className="log-console">{projectActivityLogs.length ? projectActivityLogs.join("\n") : "No project activity yet."}</div>
           </details>
           <div className="log-console">{devSession?.logs?.length ? devSession.logs.join("\n") : "No dev logs yet."}</div>
+        </div>
+
+        <div className="run-meta">
+          <h3>Repository Code</h3>
+          <p className="meta-line">Branch: {branchName}</p>
+          <select
+            className="text-input"
+            value={selectedCodeFile}
+            onChange={(event) => setSelectedCodeFile(event.target.value)}
+            disabled={project.fileIndex.length === 0}
+          >
+            {project.fileIndex.length === 0 ? <option value="">No files available</option> : null}
+            {project.fileIndex.map((filePath) => (
+              <option key={filePath} value={filePath}>
+                {filePath}
+              </option>
+            ))}
+          </select>
+          {codeError ? <p className="error-text">{codeError}</p> : null}
+          <div className="log-console code-console">
+            {isLoadingCode
+              ? "Loading file..."
+              : isBinaryCode
+                ? "Binary file preview is not supported in viewer."
+                : codeContent || "No file selected."}
+          </div>
         </div>
 
         <div className="preview-stage">

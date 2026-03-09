@@ -1,0 +1,55 @@
+import { NextResponse } from "next/server";
+import { getProject } from "@/lib/db";
+import { fetchShopifyProductByHandle } from "@/lib/shopify-admin";
+import { decryptSecret } from "@/lib/secret-crypto";
+
+export const runtime = "nodejs";
+export const maxDuration = 120;
+
+interface Params {
+  params: {
+    projectId: string;
+    handle: string;
+  };
+}
+
+export async function GET(_: Request, { params }: Params) {
+  try {
+    const project = await getProject(params.projectId);
+    if (!project) {
+      return NextResponse.json({ error: "Project not found." }, { status: 404 });
+    }
+
+    const shopDomain = project.store?.shopDomain?.trim().toLowerCase();
+    const accessTokenEncrypted = project.store?.accessTokenEncrypted;
+    const accessToken = accessTokenEncrypted
+      ? decryptSecret(accessTokenEncrypted)
+      : project.store?.accessToken;
+
+    if (!shopDomain || !accessToken) {
+      return NextResponse.json({ error: "Shopify store is not connected." }, { status: 400 });
+    }
+
+    const handle = params.handle?.trim();
+    if (!handle) {
+      return NextResponse.json({ error: "Product handle is required." }, { status: 400 });
+    }
+
+    const product = await fetchShopifyProductByHandle({
+      shopDomain,
+      accessToken,
+      handle
+    });
+
+    if (!product) {
+      return NextResponse.json({ error: "Product not found." }, { status: 404 });
+    }
+
+    return NextResponse.json({ product });
+  } catch (caught) {
+    return NextResponse.json(
+      { error: caught instanceof Error ? caught.message : "Failed to fetch Shopify product." },
+      { status: 500 }
+    );
+  }
+}

@@ -22,6 +22,7 @@ This is a brand-new SaaS prototype that matches your requested flow:
 ## Key Endpoints
 
 - `POST /api/projects` - create workspace + Expo scaffold
+- `GET /api/tasks/:taskId` - poll background task status
 - `GET /api/projects` - list workspaces
 - `GET /api/projects/:projectId` - fetch workspace state
 - `POST /api/projects/:projectId/connect-store` - connect Shopify store metadata
@@ -91,6 +92,8 @@ npm run dev
 ```
 
 Open `http://localhost:3000`.
+
+Workspace creation is now asynchronous: `POST /api/projects` returns a task ID and the UI polls task status until project setup completes.
 
 ## Migrate Existing Local Data
 

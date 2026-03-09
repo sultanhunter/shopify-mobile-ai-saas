@@ -17,6 +17,7 @@ export function ProjectCreateForm() {
   const [sdkOptions, setSdkOptions] = useState<ExpoSdkOption[]>(FALLBACK_SDK_OPTIONS);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [taskStatus, setTaskStatus] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,6 +74,7 @@ export function ProjectCreateForm() {
     }
 
     setIsSubmitting(true);
+    setTaskStatus("Queued");
     try {
       const response = await fetch("/api/projects", {
         method: "POST",
@@ -85,15 +87,58 @@ export function ProjectCreateForm() {
         })
       });
 
-      const payload = (await response.json()) as { project?: { id: string }; error?: string };
-      if (!response.ok || !payload.project?.id) {
+      const payload = (await response.json()) as { task?: { id?: string; status?: string }; error?: string };
+      if (!response.ok || !payload.task?.id) {
         throw new Error(payload.error ?? "Failed to create project.");
       }
 
-      router.push(`/projects/${payload.project.id}`);
-      router.refresh();
+      const taskId = payload.task.id;
+      setTaskStatus("Running workspace setup");
+
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+
+        const taskResponse = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
+          cache: "no-store"
+        });
+
+        const taskPayload = (await taskResponse.json().catch(() => null)) as
+          | {
+              task?: {
+                status?: string;
+                projectId?: string;
+                result?: { projectId?: string };
+                error?: string;
+              };
+              error?: string;
+            }
+          | null;
+
+        if (!taskResponse.ok || !taskPayload?.task) {
+          throw new Error(taskPayload?.error ?? "Failed to check workspace task status.");
+        }
+
+        const status = taskPayload.task.status ?? "running";
+        setTaskStatus(status === "completed" ? "Completed" : status === "failed" ? "Failed" : "Running workspace setup");
+
+        if (status === "completed") {
+          const projectId = taskPayload.task.projectId ?? taskPayload.task.result?.projectId;
+          if (!projectId) {
+            throw new Error("Workspace task completed without project id.");
+          }
+
+          router.push(`/projects/${projectId}`);
+          router.refresh();
+          return;
+        }
+
+        if (status === "failed") {
+          throw new Error(taskPayload.task.error ?? taskPayload.error ?? "Workspace creation task failed.");
+        }
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to create project.");
+      setTaskStatus(null);
       setIsSubmitting(false);
     }
   }
@@ -126,6 +171,7 @@ export function ProjectCreateForm() {
         GitHub repo.
       </p>
       {error ? <p className="error-text">{error}</p> : null}
+      {taskStatus ? <p className="meta-line">Task: {taskStatus}</p> : null}
       <button className="button" disabled={isSubmitting} type="submit">
         {isSubmitting ? "Creating..." : "Create Workspace"}
       </button>

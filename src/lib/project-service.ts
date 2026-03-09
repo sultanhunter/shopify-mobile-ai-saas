@@ -8,6 +8,7 @@ import {
 } from "@/lib/dev-runner";
 import { createExpoScaffoldFiles } from "@/lib/expo-scaffold";
 import { createInitialPreview, renderExpoFiles } from "@/lib/expo-template";
+import { renderShopifyBaselineFiles } from "@/lib/shopify-baseline";
 import { commitFiles, ensureProjectRepository, isGithubConfigured } from "@/lib/github";
 import { generateProjectUpdate } from "@/lib/llm";
 import { AiOutput } from "@/lib/ai-engine";
@@ -263,10 +264,21 @@ export async function connectStoreToProject(params: {
       backendBaseUrl: getBackendBaseUrl()
     });
 
-    const mergedFiles = mergeGeneratedFiles(current.files, files);
+    const baselineFiles = renderShopifyBaselineFiles({
+      projectId: current.id,
+      projectName: current.name,
+      shopDomain: domain,
+      backendBaseUrl: getBackendBaseUrl(),
+      brandColor: current.preview.primaryColor
+    });
+
+    const mergedFiles = {
+      ...mergeGeneratedFiles(current.files, files),
+      ...baselineFiles
+    };
 
     const message = createAssistantMessage(
-      `Store connected: ${domain}. I will now generate Expo screens that consume Shopify data through your backend API routes.`
+      `Store connected: ${domain}. Shopify baseline commerce screens (home, products, cart, checkout) are now applied.`
     );
 
     return {
