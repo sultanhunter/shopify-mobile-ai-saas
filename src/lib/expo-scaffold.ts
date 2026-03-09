@@ -1,9 +1,11 @@
 interface ExpoScaffoldResult {
+  sdk?: string;
   files: Record<string, string>;
   warnings: string[];
 }
 
 interface ScaffoldPayload {
+  sdk?: string;
   files?: Record<string, string>;
   warnings?: string[];
   error?: string;
@@ -13,7 +15,7 @@ function getScaffoldServerBaseUrl(): string | undefined {
   return process.env.EXPO_SCAFFOLD_SERVER_BASE_URL?.trim() || process.env.AI_SERVER_BASE_URL?.trim() || undefined;
 }
 
-export async function createExpoScaffoldFiles(projectName: string): Promise<ExpoScaffoldResult> {
+export async function createExpoScaffoldFiles(projectName: string, sdk: string): Promise<ExpoScaffoldResult> {
   const baseUrl = getScaffoldServerBaseUrl();
   if (!baseUrl) {
     return {
@@ -43,7 +45,7 @@ export async function createExpoScaffoldFiles(projectName: string): Promise<Expo
     response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/shopify-mobile/scaffold-expo`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ projectName }),
+      body: JSON.stringify({ projectName, sdk }),
       signal: controller.signal
     });
   } catch (error) {
@@ -71,6 +73,7 @@ export async function createExpoScaffoldFiles(projectName: string): Promise<Expo
   }
 
   return {
+    sdk: typeof payload.sdk === "string" ? payload.sdk : undefined,
     files: payload.files,
     warnings: Array.isArray(payload.warnings) ? payload.warnings : []
   };

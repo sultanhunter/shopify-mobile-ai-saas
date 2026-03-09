@@ -83,6 +83,7 @@ export interface Project {
   name: string;
   createdAt: string;
   updatedAt: string;
+  expoSdk?: string;
   preview: PreviewModel;
   files: Record<string, string>;
   messages: ChatMessage[];
@@ -104,6 +105,7 @@ export interface PublicProject {
   name: string;
   createdAt: string;
   updatedAt: string;
+  expoSdk?: string;
   preview: PreviewModel;
   messages: ChatMessage[];
   runs: AiRun[];

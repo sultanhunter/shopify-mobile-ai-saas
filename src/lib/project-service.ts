@@ -18,6 +18,16 @@ function getBackendBaseUrl() {
   return process.env.APP_BASE_URL ?? "http://localhost:3000";
 }
 
+function normalizeExpoSdkTarget(value?: string): string {
+  const raw = (value ?? "55").trim().toLowerCase();
+  const normalized = raw
+    .replace(/^sdk[-\s]?/i, "")
+    .replace(/^v/i, "")
+    .replace(/[^0-9]/g, "");
+
+  return normalized || "55";
+}
+
 function createAssistantMessage(content: string, runId?: string): ChatMessage {
   return {
     id: randomUUID(),
@@ -37,6 +47,7 @@ function toPublicProject(project: Project): PublicProject {
     name: project.name,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
+    expoSdk: project.expoSdk,
     preview: project.preview,
     messages: project.messages,
     runs: project.runs,
@@ -117,7 +128,7 @@ export async function getPublicProject(projectId: string): Promise<PublicProject
   return project ? toPublicProject(project) : undefined;
 }
 
-export async function createNewProject(projectName: string): Promise<PublicProject> {
+export async function createNewProject(projectName: string, sdkTarget?: string): Promise<PublicProject> {
   const trimmedName = projectName.trim();
   if (!trimmedName) {
     throw new Error("Project name is required");
@@ -125,8 +136,9 @@ export async function createNewProject(projectName: string): Promise<PublicProje
 
   const now = new Date().toISOString();
   const projectId = randomUUID();
+  const expoSdkTarget = normalizeExpoSdkTarget(sdkTarget);
   const initialPreview = createInitialPreview(trimmedName);
-  const scaffold = await createExpoScaffoldFiles(trimmedName);
+  const scaffold = await createExpoScaffoldFiles(trimmedName, expoSdkTarget);
 
   const generatedFiles = renderExpoFiles({
     projectName: trimmedName,
@@ -154,6 +166,7 @@ export async function createNewProject(projectName: string): Promise<PublicProje
     name: trimmedName,
     createdAt: now,
     updatedAt: now,
+    expoSdk: scaffold.sdk ?? expoSdkTarget,
     preview: initialPreview,
     files: initialFiles,
     messages: [

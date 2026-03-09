@@ -11,14 +11,15 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    const payload = (await request.json()) as { name?: string };
+    const payload = (await request.json()) as { name?: string; sdk?: string };
     const name = payload.name?.trim();
+    const sdk = payload.sdk?.trim();
 
     if (!name) {
       return NextResponse.json({ error: "Project name is required." }, { status: 400 });
     }
 
-    const project = await createNewProject(name);
+    const project = await createNewProject(name, sdk || undefined);
     return NextResponse.json({ project }, { status: 201 });
   } catch (caught) {
     return NextResponse.json(
