@@ -11,7 +11,7 @@ This is a brand-new SaaS prototype that matches your requested flow:
 ## Stack
 
 - Next.js App Router (single app for UI + API)
-- File-based local persistence (`.data/projects.json`) for fast MVP iteration
+- Supabase-backed persistence for workspace/project state
 - GitHub REST API integration for repo creation + file commits
 - Provider-based LLM layer (`src/lib/llm.ts`) with Vertex-backed Gemini via external Node server
 - Shopify OAuth callback validation + token exchange + encrypted token storage
@@ -62,6 +62,10 @@ cp .env.example .env.local
 
 3. Configure Shopify + LLM
 
+- Set `SUPABASE_URL`
+- Set `SUPABASE_SERVICE_ROLE_KEY`
+- Optional: set `SUPABASE_PROJECTS_TABLE` (defaults to `projects`)
+- Apply schema from `supabase/projects.sql` in your Supabase SQL editor
 - Set `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET`
 - Set `SHOPIFY_OAUTH_STATE_SECRET` and `SHOPIFY_TOKEN_ENCRYPTION_SECRET`
 - Set `GEMINI_API_KEY`
@@ -87,6 +91,20 @@ npm run dev
 ```
 
 Open `http://localhost:3000`.
+
+## Migrate Existing Local Data
+
+If you have existing `.data/projects.json` records from local file storage, migrate them into Supabase:
+
+```bash
+npm run migrate:projects:supabase -- --dry-run
+npm run migrate:projects:supabase
+```
+
+Optional flags:
+
+- `--file <path>` to use a non-default JSON path
+- `--table <name>` to target a custom Supabase table
 
 ## Real Dev Workflow Mode
 

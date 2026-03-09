@@ -1,63 +1,124 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { Project } from "@/lib/models";
 
-interface DatabaseShape {
-  projects: Project[];
+interface ProjectRow {
+  id: string;
+  project: Project;
+  created_at: string;
+  updated_at: string;
 }
 
-const DATA_DIR = path.join(process.cwd(), ".data");
-const DB_FILE = path.join(DATA_DIR, "projects.json");
-
+let cachedClient: SupabaseClient | null = null;
 let writeChain = Promise.resolve();
 
-async function ensureDbFile() {
-  await mkdir(DATA_DIR, { recursive: true });
-
-  try {
-    await readFile(DB_FILE, "utf8");
-  } catch {
-    const initialData: DatabaseShape = { projects: [] };
-    await writeFile(DB_FILE, JSON.stringify(initialData, null, 2), "utf8");
+function getSupabaseUrl(): string {
+  const value = process.env.SUPABASE_URL?.trim();
+  if (!value) {
+    throw new Error("SUPABASE_URL is required.");
   }
+
+  return value;
 }
 
-async function readDb(): Promise<DatabaseShape> {
-  await ensureDbFile();
-  const raw = await readFile(DB_FILE, "utf8");
+function getSupabaseServiceRoleKey(): string {
+  const value = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (!value) {
+    throw new Error("SUPABASE_SERVICE_ROLE_KEY is required.");
+  }
 
-  try {
-    const parsed = JSON.parse(raw) as DatabaseShape;
-    if (!Array.isArray(parsed.projects)) {
-      return { projects: [] };
+  return value;
+}
+
+function getProjectsTableName(): string {
+  return process.env.SUPABASE_PROJECTS_TABLE?.trim() || "projects";
+}
+
+function getSupabaseClient(): SupabaseClient {
+  if (cachedClient) {
+    return cachedClient;
+  }
+
+  cachedClient = createClient(getSupabaseUrl(), getSupabaseServiceRoleKey(), {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false
     }
+  });
 
-    return parsed;
-  } catch {
-    return { projects: [] };
-  }
+  return cachedClient;
 }
 
-async function writeDb(data: DatabaseShape) {
-  await ensureDbFile();
-  await writeFile(DB_FILE, JSON.stringify(data, null, 2), "utf8");
+function sortProjects(projects: Project[]): Project[] {
+  return projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function normalizeProject(value: unknown): Project | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const project = value as Project;
+  if (typeof project.id !== "string" || typeof project.updatedAt !== "string") {
+    return null;
+  }
+
+  return project;
+}
+
+async function fetchProjectRow(projectId: string): Promise<ProjectRow | null> {
+  const { data, error } = await getSupabaseClient()
+    .from(getProjectsTableName())
+    .select("id, project, created_at, updated_at")
+    .eq("id", projectId)
+    .maybeSingle<ProjectRow>();
+
+  if (error) {
+    throw new Error(`Supabase fetch failed: ${error.message}`);
+  }
+
+  return data ?? null;
 }
 
 export async function listProjects(): Promise<Project[]> {
-  const db = await readDb();
-  return db.projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const { data, error } = await getSupabaseClient()
+    .from(getProjectsTableName())
+    .select("project")
+    .order("updated_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Supabase list failed: ${error.message}`);
+  }
+
+  const rows = (data ?? []) as Array<{ project?: unknown }>;
+  const projects = rows
+    .map((row: { project?: unknown }) => normalizeProject(row.project))
+    .filter((project: Project | null): project is Project => project !== null);
+
+  return sortProjects(projects);
 }
 
 export async function getProject(projectId: string): Promise<Project | undefined> {
-  const db = await readDb();
-  return db.projects.find((item) => item.id === projectId);
+  const row = await fetchProjectRow(projectId);
+  if (!row) {
+    return undefined;
+  }
+
+  return normalizeProject(row.project) ?? undefined;
 }
 
 export async function createProject(project: Project): Promise<void> {
   writeChain = writeChain.then(async () => {
-    const db = await readDb();
-    db.projects.push(project);
-    await writeDb(db);
+    const row: ProjectRow = {
+      id: project.id,
+      project,
+      created_at: project.createdAt,
+      updated_at: project.updatedAt
+    };
+
+    const { error } = await getSupabaseClient().from(getProjectsTableName()).insert(row);
+    if (error) {
+      throw new Error(`Supabase insert failed: ${error.message}`);
+    }
   });
 
   await writeChain;
@@ -70,17 +131,30 @@ export async function updateProject(
   let updatedProject: Project | undefined;
 
   writeChain = writeChain.then(async () => {
-    const db = await readDb();
-    const index = db.projects.findIndex((item) => item.id === projectId);
-
-    if (index === -1) {
+    const existing = await fetchProjectRow(projectId);
+    if (!existing) {
       updatedProject = undefined;
       return;
     }
 
-    updatedProject = updater(db.projects[index]);
-    db.projects[index] = updatedProject;
-    await writeDb(db);
+    const existingProject = normalizeProject(existing.project);
+    if (!existingProject) {
+      throw new Error(`Corrupt project payload for id ${projectId}`);
+    }
+
+    updatedProject = updater(existingProject);
+
+    const row: ProjectRow = {
+      id: projectId,
+      project: updatedProject,
+      created_at: updatedProject.createdAt,
+      updated_at: updatedProject.updatedAt
+    };
+
+    const { error } = await getSupabaseClient().from(getProjectsTableName()).upsert(row, { onConflict: "id" });
+    if (error) {
+      throw new Error(`Supabase update failed: ${error.message}`);
+    }
   });
 
   await writeChain;
