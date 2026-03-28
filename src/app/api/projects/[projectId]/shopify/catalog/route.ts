@@ -5,6 +5,8 @@ import { decryptSecret } from "@/lib/secret-crypto";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 interface Params {
   params: {

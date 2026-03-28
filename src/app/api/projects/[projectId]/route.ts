@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { getPublicProject } from "@/lib/project-service";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 interface Params {
   params: {
     projectId: string;

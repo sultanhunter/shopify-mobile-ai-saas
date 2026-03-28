@@ -3,6 +3,8 @@ import { listProjectRepoFiles } from "@/lib/dev-runner";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 interface Params {
   params: {
