@@ -11,6 +11,7 @@ interface WorkspaceClientProps {
 }
 
 type ThinkingMode = "low" | "medium" | "high" | "xHigh";
+type CodeViewerScope = "expo" | "backend";
 
 const LLM_MODEL_OPTIONS = ["gpt-5.4"];
 const THINKING_MODE_OPTIONS: ThinkingMode[] = ["low", "medium", "high", "xHigh"];
@@ -44,6 +45,23 @@ function formatLogLine(message: ChatMessage): string {
   return `[${time}] ${message.content}`;
 }
 
+function normalizeWorkspaceDir(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === "." || trimmed === "./") {
+    return ".";
+  }
+
+  return trimmed.replace(/^\.\//, "").replace(/\/$/, "") || fallback;
+}
+
+function isFileInsideDir(filePath: string, dir: string): boolean {
+  if (dir === ".") {
+    return true;
+  }
+
+  return filePath === dir || filePath.startsWith(`${dir}/`);
+}
+
 export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const searchParams = useSearchParams();
   const [project, setProject] = useState<PublicProject>(initialProject);
@@ -63,6 +81,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const [streamedResponse, setStreamedResponse] = useState("");
   const [streamEvents, setStreamEvents] = useState<string[]>([]);
   const [showCodeViewer, setShowCodeViewer] = useState(false);
+  const [codeViewerScope, setCodeViewerScope] = useState<CodeViewerScope>("expo");
   const [repoFiles, setRepoFiles] = useState<string[]>(initialProject.fileIndex ?? []);
   const [selectedCodeFile, setSelectedCodeFile] = useState("");
   const [isLoadingCode, setIsLoadingCode] = useState(false);
@@ -110,6 +129,36 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   }, [devSession?.expoUrl, devSession?.status]);
 
   const branchName = project.github.defaultBranch ?? "main";
+  const mobileCodeRoot = useMemo(
+    () => normalizeWorkspaceDir(project.workspaceLayout?.mobileAppDir, "mobile"),
+    [project.workspaceLayout?.mobileAppDir]
+  );
+  const backendCodeRoot = useMemo(
+    () => normalizeWorkspaceDir(project.workspaceLayout?.expoBackendDir ?? project.workspaceLayout?.backendDir, "expo-backend"),
+    [project.workspaceLayout?.expoBackendDir, project.workspaceLayout?.backendDir]
+  );
+
+  const expoCodeFiles = useMemo(() => {
+    if (mobileCodeRoot === ".") {
+      if (backendCodeRoot === ".") {
+        return repoFiles;
+      }
+
+      return repoFiles.filter((filePath) => !isFileInsideDir(filePath, backendCodeRoot));
+    }
+
+    return repoFiles.filter((filePath) => isFileInsideDir(filePath, mobileCodeRoot));
+  }, [backendCodeRoot, mobileCodeRoot, repoFiles]);
+
+  const backendCodeFiles = useMemo(() => {
+    if (backendCodeRoot === ".") {
+      return repoFiles;
+    }
+
+    return repoFiles.filter((filePath) => isFileInsideDir(filePath, backendCodeRoot));
+  }, [backendCodeRoot, repoFiles]);
+
+  const visibleCodeFiles = codeViewerScope === "expo" ? expoCodeFiles : backendCodeFiles;
 
   const refreshRepoFiles = useCallback(async () => {
     try {
@@ -134,17 +183,17 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
       return;
     }
 
-    if (repoFiles.length === 0) {
+    if (visibleCodeFiles.length === 0) {
       if (selectedCodeFile) {
         setSelectedCodeFile("");
       }
       return;
     }
 
-    if (!selectedCodeFile || !repoFiles.includes(selectedCodeFile)) {
-      setSelectedCodeFile(repoFiles[0]);
+    if (!selectedCodeFile || !visibleCodeFiles.includes(selectedCodeFile)) {
+      setSelectedCodeFile(visibleCodeFiles[0]);
     }
-  }, [repoFiles, selectedCodeFile, showCodeViewer]);
+  }, [selectedCodeFile, showCodeViewer, visibleCodeFiles]);
 
   useEffect(() => {
     if (!showCodeViewer || !selectedCodeFile) {
@@ -200,6 +249,12 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
       cancelled = true;
     };
   }, [project.id, selectedCodeFile, showCodeViewer]);
+
+  const openCodeViewer = useCallback((scope: CodeViewerScope) => {
+    setCodeViewerScope(scope);
+    setShowCodeViewer(true);
+    setCodeError(null);
+  }, []);
 
   async function connectStoreWithOAuth() {
     const normalizedDomain = storeDomain.trim();
@@ -621,14 +676,19 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
               {isStoppingDevSession ? "Stopping..." : "Stop"}
             </button>
           </div>
-          <button
-            className="button"
-            type="button"
-            disabled={repoFiles.length === 0}
-            onClick={() => setShowCodeViewer((current) => !current)}
-          >
-            {showCodeViewer ? "Hide Code" : "View Code"}
-          </button>
+          <div className="inline-grid">
+            <button className="button" type="button" disabled={expoCodeFiles.length === 0} onClick={() => openCodeViewer("expo")}>
+              Expo Code
+            </button>
+            <button className="button" type="button" disabled={backendCodeFiles.length === 0} onClick={() => openCodeViewer("backend")}>
+              Backend Code
+            </button>
+            {showCodeViewer ? (
+              <button className="button" type="button" onClick={() => setShowCodeViewer(false)}>
+                Hide Code
+              </button>
+            ) : null}
+          </div>
           {devSessionFeedback ? <p className="meta-line">{devSessionFeedback}</p> : null}
           {devSessionError ? <p className="error-text">{devSessionError}</p> : null}
           {devSession?.error ? <p className="error-text">Runner: {devSession.error}</p> : null}
@@ -649,16 +709,16 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
         {showCodeViewer ? (
           <div className="run-meta">
-            <h3>Repository Code</h3>
+            <h3>{codeViewerScope === "expo" ? "Expo Repository Code" : "Backend Repository Code"}</h3>
             <p className="meta-line">Branch: {branchName}</p>
             <select
               className="text-input"
               value={selectedCodeFile}
               onChange={(event) => setSelectedCodeFile(event.target.value)}
-              disabled={repoFiles.length === 0}
+              disabled={visibleCodeFiles.length === 0}
             >
-              {repoFiles.length === 0 ? <option value="">No files available</option> : null}
-              {repoFiles.map((filePath) => (
+              {visibleCodeFiles.length === 0 ? <option value="">No files available</option> : null}
+              {visibleCodeFiles.map((filePath) => (
                 <option key={filePath} value={filePath}>
                   {filePath}
                 </option>
