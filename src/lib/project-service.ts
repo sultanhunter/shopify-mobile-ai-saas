@@ -30,11 +30,6 @@ function getControlPlaneBaseUrl() {
     return appBaseUrl.replace(/\/$/, "");
   }
 
-  const runnerServerBaseUrl = process.env.RUNNER_SERVER_BASE_URL?.trim() || process.env.AI_SERVER_BASE_URL?.trim();
-  if (runnerServerBaseUrl) {
-    return runnerServerBaseUrl.replace(/\/$/, "");
-  }
-
   return "http://localhost:3000";
 }
 
@@ -458,6 +453,7 @@ export async function startProjectDevSession(
   const session = await startDevRunnerSession({
     projectId: project.id,
     repoUrl: project.github.repoUrl,
+    controlPlaneBaseUrl: getControlPlaneBaseUrl(),
     branch: "main",
     install: options?.install ?? true,
     useTunnel: options?.useTunnel ?? true,
