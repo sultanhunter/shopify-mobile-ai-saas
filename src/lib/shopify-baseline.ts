@@ -3,7 +3,6 @@ interface ShopifyBaselineInput {
   projectName: string;
   shopDomain: string;
   controlPlaneBaseUrl: string;
-  runtimeBackendBaseUrl: string;
   mobileAppDir: string;
   expoBackendDir?: string;
   expoBackendPort?: number;
@@ -550,19 +549,15 @@ const styles = StyleSheet.create({
 }
 
 function renderStoreConfig(input: ShopifyBaselineInput): string {
-  return `const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return `const injectedExpoBackendBaseUrl = process.env.EXPO_PUBLIC_RUNTIME_BACKEND_URL?.trim() || "";
 
 export const storeConfig = {
   projectId: ${JSON.stringify(input.projectId)},
   projectName: ${JSON.stringify(input.projectName)},
   shopDomain: ${JSON.stringify(input.shopDomain)},
   controlPlaneBaseUrl: ${JSON.stringify(input.controlPlaneBaseUrl)},
-  expoBackendBaseUrl:
-    env?.EXPO_PUBLIC_RUNTIME_BACKEND_URL?.trim() ||
-    ${JSON.stringify(input.runtimeBackendBaseUrl)},
-  runtimeBackendBaseUrl:
-    env?.EXPO_PUBLIC_RUNTIME_BACKEND_URL?.trim() ||
-    ${JSON.stringify(input.runtimeBackendBaseUrl)},
+  expoBackendBaseUrl: injectedExpoBackendBaseUrl,
+  runtimeBackendBaseUrl: injectedExpoBackendBaseUrl,
   brandColor: ${JSON.stringify(input.brandColor)}
 } as const;
 `;
@@ -589,7 +584,11 @@ function renderShopifyApi(): string {
 import { ProductDetail, ProductSummary } from "./types";
 
 function apiUrl(path: string): string {
-  const root = (storeConfig.expoBackendBaseUrl || storeConfig.runtimeBackendBaseUrl).replace(/\\/$/, "");
+  const root = storeConfig.expoBackendBaseUrl.replace(/\\/$/, "");
+  if (!root) {
+    throw new Error("Missing EXPO_PUBLIC_RUNTIME_BACKEND_URL. Start the dev session from SaaS so runner injects the Expo backend URL.");
+  }
+
   return root + path;
 }
 
@@ -1219,7 +1218,11 @@ function renderAuthConfig(): string {
   return `import { storeConfig } from "../shopify/store-config";
 import { AuthMethod, CustomerAuthConfigResponse, CustomerAuthRemoteConfig } from "./types";
 
-const API_BASE = (storeConfig.expoBackendBaseUrl || storeConfig.runtimeBackendBaseUrl).replace(/\\/$/, "");
+const API_BASE = storeConfig.expoBackendBaseUrl.replace(/\\/$/, "");
+
+if (!API_BASE) {
+  throw new Error("Missing EXPO_PUBLIC_RUNTIME_BACKEND_URL. Start the dev session from SaaS so runner injects the Expo backend URL.");
+}
 
 function absolute(path: string): string {
   if (path.startsWith("http://") || path.startsWith("https://")) {

@@ -83,9 +83,11 @@ cp .env.example .env.local
 - `SHOPIFY_CUSTOMER_AUTH_CALLBACK_URL` (defaults to `<NEXTJS_APP_BASE_URL>/api/shopify/customer-auth/callback`)
 - Set `GEMINI_API_KEY`
 - Set `NEXTJS_APP_BASE_URL` to your public Next.js URL (used for Shopify OAuth redirect URL)
-- Set `MOBILE_EXPO_BACKEND_BASE_URL` to the public URL/IP of each generated workspace expo backend (preferred)
-- Optional legacy alias: `MOBILE_RUNTIME_BACKEND_BASE_URL` (used when expo var is not set)
-- Optional legacy alias: `MOBILE_BACKEND_BASE_URL` (used when runtime var is not set)
+- Expo backend URL is injected by runner per session (`EXPO_PUBLIC_RUNTIME_BACKEND_URL`)
+- Optional legacy static URL aliases (not used by current baseline generator):
+  - `MOBILE_EXPO_BACKEND_BASE_URL`
+  - `MOBILE_RUNTIME_BACKEND_BASE_URL`
+  - `MOBILE_BACKEND_BASE_URL`
 - Optional workspace layout envs for create-task payload:
   - `WORKSPACE_MOBILE_APP_DIR` (default `mobile`)
   - `WORKSPACE_EXPO_BACKEND_DIR` (default `expo-backend`)

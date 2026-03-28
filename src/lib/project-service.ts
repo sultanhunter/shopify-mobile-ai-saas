@@ -38,21 +38,6 @@ function getControlPlaneBaseUrl() {
   return "http://localhost:3000";
 }
 
-function getRuntimeBackendBaseUrl(controlPlaneBaseUrl: string) {
-  const runtimeBaseUrl =
-    process.env.MOBILE_EXPO_BACKEND_BASE_URL?.trim() || process.env.MOBILE_RUNTIME_BACKEND_BASE_URL?.trim();
-  if (runtimeBaseUrl) {
-    return runtimeBaseUrl.replace(/\/$/, "");
-  }
-
-  const legacyMobileBackendBaseUrl = process.env.MOBILE_BACKEND_BASE_URL?.trim();
-  if (legacyMobileBackendBaseUrl) {
-    return legacyMobileBackendBaseUrl.replace(/\/$/, "");
-  }
-
-  return controlPlaneBaseUrl;
-}
-
 function createAssistantMessage(content: string, runId?: string): ChatMessage {
   return {
     id: randomUUID(),
@@ -311,14 +296,11 @@ export async function connectStoreToProject(params: {
   }
 
   const controlPlaneBaseUrl = getControlPlaneBaseUrl();
-  const runtimeBackendBaseUrl = getRuntimeBackendBaseUrl(controlPlaneBaseUrl);
-
   const baselineInput = {
     projectId: connected.id,
     projectName: connected.name,
     shopDomain: domain,
     controlPlaneBaseUrl,
-    runtimeBackendBaseUrl,
     mobileAppDir: workspaceLayout.mobileAppDir,
     expoBackendDir: workspaceLayout.expoBackendDir,
     expoBackendPort: workspaceLayout.expoBackendPort,
