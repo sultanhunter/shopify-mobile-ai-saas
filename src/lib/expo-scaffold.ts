@@ -12,7 +12,12 @@ interface ScaffoldPayload {
 }
 
 function getScaffoldServerBaseUrl(): string | undefined {
-  return process.env.EXPO_SCAFFOLD_SERVER_BASE_URL?.trim() || process.env.AI_SERVER_BASE_URL?.trim() || undefined;
+  return (
+    process.env.EXPO_SCAFFOLD_SERVER_BASE_URL?.trim() ||
+    process.env.RUNNER_SERVER_BASE_URL?.trim() ||
+    process.env.AI_SERVER_BASE_URL?.trim() ||
+    undefined
+  );
 }
 
 export async function createExpoScaffoldFiles(projectName: string, sdk: string): Promise<ExpoScaffoldResult> {
@@ -31,7 +36,8 @@ export async function createExpoScaffoldFiles(projectName: string, sdk: string):
     "Content-Type": "application/json"
   };
 
-  const token = (process.env.EXPO_SCAFFOLD_SERVER_TOKEN ?? process.env.AI_SERVER_TOKEN)?.trim();
+  const token =
+    (process.env.EXPO_SCAFFOLD_SERVER_TOKEN ?? process.env.RUNNER_SERVER_TOKEN ?? process.env.AI_SERVER_TOKEN)?.trim();
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }

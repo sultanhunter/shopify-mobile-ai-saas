@@ -19,26 +19,36 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Project name is required." }, { status: 400 });
     }
 
-    const baseUrl = process.env.AI_SERVER_BASE_URL?.trim();
+    const baseUrl = process.env.RUNNER_SERVER_BASE_URL?.trim() || process.env.AI_SERVER_BASE_URL?.trim();
     if (!baseUrl) {
-      return NextResponse.json({ error: "AI_SERVER_BASE_URL is missing." }, { status: 500 });
+      return NextResponse.json({ error: "RUNNER_SERVER_BASE_URL is missing." }, { status: 500 });
     }
 
     const headers: HeadersInit = {
       "Content-Type": "application/json"
     };
 
-    const token = process.env.AI_SERVER_TOKEN?.trim();
+    const token = process.env.RUNNER_SERVER_TOKEN?.trim() || process.env.AI_SERVER_TOKEN?.trim();
     if (token) {
       headers.Authorization = `Bearer ${token}`;
     }
+
+    const backendPortRaw = Number(process.env.WORKSPACE_EXPO_BACKEND_PORT || process.env.WORKSPACE_BACKEND_PORT || "4100");
+    const backendPort = Number.isFinite(backendPortRaw) && backendPortRaw > 0 ? backendPortRaw : 4100;
 
     const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/shopify-mobile/tasks/workspace/create`, {
       method: "POST",
       headers,
       body: JSON.stringify({
         name,
-        sdk: sdk || "55"
+        sdk: sdk || "55",
+        workspaceLayout: {
+          mobileAppDir: process.env.WORKSPACE_MOBILE_APP_DIR?.trim() || "mobile",
+          expoBackendDir: process.env.WORKSPACE_EXPO_BACKEND_DIR?.trim() || process.env.WORKSPACE_BACKEND_DIR?.trim() || "expo-backend",
+          expoBackendPort: backendPort,
+          backendDir: process.env.WORKSPACE_EXPO_BACKEND_DIR?.trim() || process.env.WORKSPACE_BACKEND_DIR?.trim() || "expo-backend",
+          backendPort,
+        }
       })
     });
 

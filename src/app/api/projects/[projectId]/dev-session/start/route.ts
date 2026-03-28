@@ -12,11 +12,17 @@ interface Params {
 
 export async function POST(request: NextRequest, { params }: Params) {
   try {
-    const payload = (await request.json().catch(() => ({}))) as { install?: boolean; useTunnel?: boolean };
+    const payload = (await request.json().catch(() => ({}))) as {
+      install?: boolean;
+      useTunnel?: boolean;
+      startExpoBackend?: boolean;
+      startBackend?: boolean;
+    };
 
     const result = await startProjectDevSession(params.projectId, {
       install: payload.install,
-      useTunnel: payload.useTunnel
+      useTunnel: payload.useTunnel,
+      startBackend: payload.startExpoBackend ?? payload.startBackend,
     });
 
     return NextResponse.json(result, { status: 202 });

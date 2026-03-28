@@ -189,9 +189,9 @@ export interface OpenCodeUiEvent {
 }
 
 function getAiServerBaseUrl(): string {
-  const baseUrl = process.env.AI_SERVER_BASE_URL?.trim();
+  const baseUrl = process.env.RUNNER_SERVER_BASE_URL?.trim() || process.env.AI_SERVER_BASE_URL?.trim();
   if (!baseUrl) {
-    throw new Error("AI_SERVER_BASE_URL is missing.");
+    throw new Error("RUNNER_SERVER_BASE_URL is missing.");
   }
 
   return baseUrl.replace(/\/$/, "");
@@ -202,7 +202,7 @@ function buildAiServerHeaders(): HeadersInit {
     "Content-Type": "application/json"
   };
 
-  const token = process.env.AI_SERVER_TOKEN?.trim();
+  const token = process.env.RUNNER_SERVER_TOKEN?.trim() || process.env.AI_SERVER_TOKEN?.trim();
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
@@ -211,7 +211,7 @@ function buildAiServerHeaders(): HeadersInit {
 }
 
 function getAiServerTimeoutMs(): number {
-  const requestTimeoutMs = Number(process.env.AI_SERVER_TIMEOUT_MS ?? "600000");
+  const requestTimeoutMs = Number(process.env.RUNNER_SERVER_TIMEOUT_MS ?? process.env.AI_SERVER_TIMEOUT_MS ?? "600000");
   return Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : 600000;
 }
 
@@ -432,7 +432,7 @@ async function generateWithVertexServer(input: LlmProjectUpdateInput): Promise<A
     });
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`AI server timed out after ${Math.round(timeoutMs / 1000)}s.`);
+      throw new Error(`Runner server timed out after ${Math.round(timeoutMs / 1000)}s.`);
     }
 
     throw error;
@@ -442,7 +442,7 @@ async function generateWithVertexServer(input: LlmProjectUpdateInput): Promise<A
 
   const payload = (await response.json().catch(() => null)) as VertexServerResponse | null;
   if (!response.ok || !payload?.result) {
-    throw new Error(payload?.error ?? "AI server generation failed.");
+    throw new Error(payload?.error ?? "Runner server generation failed.");
   }
 
   const preview = normalizePreview(payload.result.preview, input.project.preview);

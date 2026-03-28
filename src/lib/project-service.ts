@@ -9,28 +9,48 @@ import {
   stopDevRunnerSession
 } from "@/lib/dev-runner";
 import { renderShopifyBaselineFiles, validateShopifyBaselineFiles } from "@/lib/shopify-baseline";
+import { detectCustomerAuthState } from "@/lib/shopify-customer-auth";
 import { generateProjectUpdate } from "@/lib/llm";
 import { AiOutput } from "@/lib/ai-engine";
-import { AiRun, ChatMessage, DevSessionState, Project, PublicProject } from "@/lib/models";
+import {
+  AiRun,
+  ChatMessage,
+  DevSessionState,
+  Project,
+  PublicProject,
+  PublicShopifyCustomerAuthState,
+  ShopifyCustomerAuthState,
+  WorkspaceLayout,
+} from "@/lib/models";
 import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 
-function getBackendBaseUrl() {
-  const mobileBackendBaseUrl = process.env.MOBILE_BACKEND_BASE_URL?.trim();
-  if (mobileBackendBaseUrl) {
-    return mobileBackendBaseUrl.replace(/\/$/, "");
-  }
-
-  const appBaseUrl = process.env.APP_BASE_URL?.trim();
+function getControlPlaneBaseUrl() {
+  const appBaseUrl = process.env.NEXTJS_APP_BASE_URL?.trim() || process.env.APP_BASE_URL?.trim();
   if (appBaseUrl) {
     return appBaseUrl.replace(/\/$/, "");
   }
 
-  const aiServerBaseUrl = process.env.AI_SERVER_BASE_URL?.trim();
-  if (aiServerBaseUrl) {
-    return aiServerBaseUrl.replace(/\/$/, "");
+  const runnerServerBaseUrl = process.env.RUNNER_SERVER_BASE_URL?.trim() || process.env.AI_SERVER_BASE_URL?.trim();
+  if (runnerServerBaseUrl) {
+    return runnerServerBaseUrl.replace(/\/$/, "");
   }
 
   return "http://localhost:3000";
+}
+
+function getRuntimeBackendBaseUrl(controlPlaneBaseUrl: string) {
+  const runtimeBaseUrl =
+    process.env.MOBILE_EXPO_BACKEND_BASE_URL?.trim() || process.env.MOBILE_RUNTIME_BACKEND_BASE_URL?.trim();
+  if (runtimeBaseUrl) {
+    return runtimeBaseUrl.replace(/\/$/, "");
+  }
+
+  const legacyMobileBackendBaseUrl = process.env.MOBILE_BACKEND_BASE_URL?.trim();
+  if (legacyMobileBackendBaseUrl) {
+    return legacyMobileBackendBaseUrl.replace(/\/$/, "");
+  }
+
+  return controlPlaneBaseUrl;
 }
 
 function createAssistantMessage(content: string, runId?: string): ChatMessage {
@@ -40,6 +60,60 @@ function createAssistantMessage(content: string, runId?: string): ChatMessage {
     content,
     createdAt: new Date().toISOString(),
     runId
+  };
+}
+
+function normalizeWorkspaceDir(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === "." || trimmed === "./") {
+    return ".";
+  }
+
+  return trimmed.replace(/^\.\//, "").replace(/\/$/, "") || fallback;
+}
+
+function resolveWorkspaceLayout(project: Project): WorkspaceLayout {
+  const configured = project.workspaceLayout;
+  if (configured) {
+    const expoBackendDir = configured.expoBackendDir ?? configured.backendDir;
+    const expoBackendPort = configured.expoBackendPort ?? configured.backendPort;
+    const expoBackendStartCommand = configured.expoBackendStartCommand ?? configured.backendStartCommand;
+
+    return {
+      mobileAppDir: normalizeWorkspaceDir(configured.mobileAppDir, "mobile"),
+      expoBackendDir: normalizeWorkspaceDir(expoBackendDir, "expo-backend"),
+      expoBackendPort: Number.isFinite(expoBackendPort) && expoBackendPort > 0 ? expoBackendPort : 4100,
+      expoBackendStartCommand: expoBackendStartCommand?.trim() || "npm run dev",
+      backendDir: normalizeWorkspaceDir(expoBackendDir, "expo-backend"),
+      backendPort: Number.isFinite(expoBackendPort) && expoBackendPort > 0 ? expoBackendPort : 4100,
+      backendStartCommand: expoBackendStartCommand?.trim() || "npm run dev",
+    };
+  }
+
+  const hasMobileScaffold = (project.fileIndex ?? []).some(
+    (filePath) => filePath === "mobile/package.json" || filePath.startsWith("mobile/")
+  );
+
+  if (hasMobileScaffold) {
+    return {
+      mobileAppDir: "mobile",
+      expoBackendDir: "expo-backend",
+      expoBackendPort: 4100,
+      expoBackendStartCommand: "npm run dev",
+      backendDir: "expo-backend",
+      backendPort: 4100,
+      backendStartCommand: "npm run dev",
+    };
+  }
+
+  return {
+    mobileAppDir: ".",
+    expoBackendDir: "expo-backend",
+    expoBackendPort: 4100,
+    expoBackendStartCommand: "npm run dev",
+    backendDir: "expo-backend",
+    backendPort: 4100,
+    backendStartCommand: "npm run dev",
   };
 }
 
@@ -58,11 +132,13 @@ function toPublicProject(project: Project): PublicProject {
     runs: project.runs,
     devSession: project.devSession,
     opencodeSession: project.opencodeSession,
+    workspaceLayout: project.workspaceLayout,
     store: project.store
       ? {
           shopDomain: project.store.shopDomain,
           connectedAt: project.store.connectedAt,
-          hasAccessToken: hasEncryptedToken || hasLegacyToken
+          hasAccessToken: hasEncryptedToken || hasLegacyToken,
+          customerAuth: toPublicCustomerAuthState(project.store.customerAuth),
         }
       : undefined,
     github: project.github,
@@ -70,11 +146,46 @@ function toPublicProject(project: Project): PublicProject {
   };
 }
 
+function toPublicCustomerAuthState(authState: ShopifyCustomerAuthState | undefined): PublicShopifyCustomerAuthState | undefined {
+  if (!authState) {
+    return undefined;
+  }
+
+  return {
+    detectedAt: authState.detectedAt,
+    activeMethod: authState.activeMethod,
+    recommendedMethod: authState.recommendedMethod,
+    supportedMethods: [...authState.supportedMethods],
+    hosted: authState.hosted,
+    customerAccountApi: {
+      enabled: authState.customerAccountApi.enabled,
+      hasClientId: Boolean(authState.customerAccountApi.clientId),
+      scopes: [...authState.customerAccountApi.scopes],
+      issuer: authState.customerAccountApi.issuer,
+      authorizationEndpoint: authState.customerAccountApi.authorizationEndpoint,
+      tokenEndpoint: authState.customerAccountApi.tokenEndpoint,
+    },
+  };
+}
+
 function normalizeDevSessionState(session: DevSessionState): DevSessionState {
+  const expoBackendStatus = session.expoBackendStatus ?? session.backendStatus;
+  const expoBackendUrl = session.expoBackendUrl ?? session.backendUrl;
+  const expoBackendPort = session.expoBackendPort ?? session.backendPort;
+  const expoBackendLogs = session.expoBackendLogs ?? session.backendLogs;
+
   return {
     ...session,
+    expoBackendStatus,
+    backendStatus: expoBackendStatus,
+    expoBackendUrl,
+    backendUrl: expoBackendUrl,
+    expoBackendPort,
+    backendPort: expoBackendPort,
+    expoBackendLogs: expoBackendLogs?.slice(-200),
     proxiedWebUrl: undefined,
-    logs: session.logs.slice(-200)
+    logs: session.logs.slice(-200),
+    backendLogs: expoBackendLogs?.slice(-200)
   };
 }
 
@@ -155,6 +266,25 @@ export async function connectStoreToProject(params: {
     throw new Error("Project not found");
   }
 
+  const workspaceLayout = resolveWorkspaceLayout(project);
+
+  const fallbackOrigin = process.env.NEXTJS_APP_BASE_URL?.trim() || process.env.APP_BASE_URL?.trim() || "http://localhost:3000";
+  const resolvedAccessToken =
+    params.accessToken?.trim() ||
+    (project.store?.accessTokenEncrypted ? decryptSecret(project.store.accessTokenEncrypted) : project.store?.accessToken);
+  let detectedCustomerAuth = project.store?.customerAuth;
+
+  try {
+    detectedCustomerAuth = await detectCustomerAuthState({
+      shopDomain: domain,
+      accessToken: resolvedAccessToken,
+      fallbackOrigin,
+      current: project.store?.customerAuth,
+    });
+  } catch {
+    detectedCustomerAuth = project.store?.customerAuth;
+  }
+
   const now = new Date().toISOString();
   const connected = await updateProject(project.id, (current) => {
     const encryptedAccessToken = params.accessToken
@@ -168,8 +298,10 @@ export async function connectStoreToProject(params: {
         shopDomain: domain,
         accessToken: params.accessToken ? undefined : current.store?.accessToken,
         accessTokenEncrypted: encryptedAccessToken,
-        connectedAt: now
+        connectedAt: now,
+        customerAuth: detectedCustomerAuth,
       },
+      workspaceLayout: current.workspaceLayout ?? workspaceLayout,
       messages: [...current.messages, createAssistantMessage(`Store connected: ${domain}. Applying Shopify baseline...`)]
     };
   });
@@ -178,15 +310,24 @@ export async function connectStoreToProject(params: {
     throw new Error("Project not found");
   }
 
-  const baselineFiles = renderShopifyBaselineFiles({
+  const controlPlaneBaseUrl = getControlPlaneBaseUrl();
+  const runtimeBackendBaseUrl = getRuntimeBackendBaseUrl(controlPlaneBaseUrl);
+
+  const baselineInput = {
     projectId: connected.id,
     projectName: connected.name,
     shopDomain: domain,
-    backendBaseUrl: getBackendBaseUrl(),
+    controlPlaneBaseUrl,
+    runtimeBackendBaseUrl,
+    mobileAppDir: workspaceLayout.mobileAppDir,
+    expoBackendDir: workspaceLayout.expoBackendDir,
+    expoBackendPort: workspaceLayout.expoBackendPort,
     brandColor: connected.preview.primaryColor
-  });
+  };
 
-  validateShopifyBaselineFiles(baselineFiles);
+  const baselineFiles = renderShopifyBaselineFiles(baselineInput);
+
+  validateShopifyBaselineFiles(baselineFiles, baselineInput);
 
   const applied = await applyFilesToProjectRepo({
     projectId: connected.id,
@@ -197,13 +338,13 @@ export async function connectStoreToProject(params: {
     ...current,
     updatedAt: new Date().toISOString(),
     fileIndex: applied.fileIndex,
-    messages: [
-      ...current.messages,
-      createAssistantMessage(
-        `Store connected: ${domain}. Shopify baseline commerce screens (home, products, cart, checkout) are now applied locally.`
-      )
-    ]
-  }));
+      messages: [
+        ...current.messages,
+        createAssistantMessage(
+          `Store connected: ${domain}. Shopify baseline was applied to ${workspaceLayout.mobileAppDir}/ and ${workspaceLayout.expoBackendDir}/.`
+        )
+      ]
+    }));
 
   return toPublicProject(finalized ?? connected);
 }
@@ -319,7 +460,7 @@ export async function getProjectStoreAdminAccessToken(projectId: string): Promis
 
 export async function startProjectDevSession(
   projectId: string,
-  options?: { install?: boolean; useTunnel?: boolean }
+  options?: { install?: boolean; useTunnel?: boolean; startBackend?: boolean }
 ): Promise<{ project: PublicProject; devSession: DevSessionState }> {
   const project = await getProject(projectId);
   if (!project) {
@@ -330,22 +471,34 @@ export async function startProjectDevSession(
     throw new Error("GitHub repository is required before starting a dev session.");
   }
 
+  const workspaceLayout = resolveWorkspaceLayout(project);
+
   const session = await startDevRunnerSession({
     projectId: project.id,
     repoUrl: project.github.repoUrl,
     branch: "main",
     install: options?.install ?? true,
-    useTunnel: options?.useTunnel ?? true
+    useTunnel: options?.useTunnel ?? true,
+    appDirectory: workspaceLayout.mobileAppDir,
+    expoBackendDirectory: workspaceLayout.expoBackendDir,
+    expoBackendPort: workspaceLayout.expoBackendPort,
+    expoBackendStartCommand: workspaceLayout.expoBackendStartCommand,
+    expoBackendHealthPath: "/api/health",
+    startExpoBackend: options?.startBackend ?? true,
+    injectExpoPublicRuntimeBackendUrl: true,
   });
 
   const normalized = normalizeDevSessionState(session);
   const updated = await updateProject(project.id, (current) => ({
     ...current,
     updatedAt: new Date().toISOString(),
+    workspaceLayout: current.workspaceLayout ?? workspaceLayout,
     devSession: normalized,
     messages: [
       ...current.messages,
-      createAssistantMessage(`Dev session started (${normalized.id}). Waiting for Expo URLs...`)
+      createAssistantMessage(
+        `Dev session started (${normalized.id}) for mobile (${workspaceLayout.mobileAppDir}) and expo backend (${workspaceLayout.expoBackendDir}). Waiting for URLs...`
+      )
     ]
   }));
 
@@ -472,7 +625,7 @@ export async function stopProjectDevSession(
     ...current,
     updatedAt: new Date().toISOString(),
     devSession: normalized,
-    messages: [...current.messages, createAssistantMessage("Dev session stopped.")]
+    messages: [...current.messages, createAssistantMessage("Dev session stopped (mobile and expo backend).")]
   }));
 
   if (!updated) {

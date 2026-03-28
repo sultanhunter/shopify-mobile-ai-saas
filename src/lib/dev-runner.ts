@@ -31,9 +31,9 @@ interface DevRunnerRepoApplyResponse {
 }
 
 function getDevRunnerBaseUrl(): string {
-  const baseUrl = process.env.AI_SERVER_BASE_URL?.trim();
+  const baseUrl = process.env.RUNNER_SERVER_BASE_URL?.trim() || process.env.AI_SERVER_BASE_URL?.trim();
   if (!baseUrl) {
-    throw new Error("AI_SERVER_BASE_URL is missing.");
+    throw new Error("RUNNER_SERVER_BASE_URL is missing.");
   }
 
   return baseUrl.replace(/\/$/, "");
@@ -44,7 +44,7 @@ function buildHeaders(): HeadersInit {
     "Content-Type": "application/json"
   };
 
-  const token = process.env.AI_SERVER_TOKEN?.trim();
+  const token = process.env.RUNNER_SERVER_TOKEN?.trim() || process.env.AI_SERVER_TOKEN?.trim();
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
@@ -77,19 +77,80 @@ export async function startDevRunnerSession(input: {
   branch?: string;
   install?: boolean;
   useTunnel?: boolean;
+  appDirectory?: string;
+  expoBackendDirectory?: string;
+  expoBackendPort?: number;
+  expoBackendStartCommand?: string;
+  expoBackendHealthPath?: string;
+  startExpoBackend?: boolean;
+  backendDirectory?: string;
+  backendPort?: number;
+  backendStartCommand?: string;
+  backendHealthPath?: string;
+  startBackend?: boolean;
+  injectExpoPublicRuntimeBackendUrl?: boolean;
 }): Promise<DevSessionState> {
-  const response = await fetch(`${getDevRunnerBaseUrl()}/api/shopify-mobile/dev-session/start`, {
-    method: "POST",
-    headers: buildHeaders(),
-    body: JSON.stringify(input)
-  });
+  async function postStart(payload: Record<string, unknown>) {
+    const response = await fetch(`${getDevRunnerBaseUrl()}/api/shopify-mobile/dev-session/start`, {
+      method: "POST",
+      headers: buildHeaders(),
+      body: JSON.stringify(payload)
+    });
 
-  const payload = await parseJson<DevRunnerSessionResponse>(response);
-  if (!response.ok || !payload?.session) {
-    throw new Error(await buildUpstreamError(response, "Failed to start dev session", payload?.error));
+    const body = await parseJson<DevRunnerSessionResponse>(response);
+    return { response, body };
   }
 
-  return payload.session;
+  const normalizedPayload = {
+    ...input,
+    backendDirectory: input.backendDirectory ?? input.expoBackendDirectory,
+    backendPort: input.backendPort ?? input.expoBackendPort,
+    backendStartCommand: input.backendStartCommand ?? input.expoBackendStartCommand,
+    backendHealthPath: input.backendHealthPath ?? input.expoBackendHealthPath,
+    startBackend: input.startBackend ?? input.startExpoBackend,
+    expoBackendDirectory: input.expoBackendDirectory ?? input.backendDirectory,
+    expoBackendPort: input.expoBackendPort ?? input.backendPort,
+    expoBackendStartCommand: input.expoBackendStartCommand ?? input.backendStartCommand,
+    expoBackendHealthPath: input.expoBackendHealthPath ?? input.backendHealthPath,
+    startExpoBackend: input.startExpoBackend ?? input.startBackend,
+  };
+
+  const firstAttempt = await postStart(normalizedPayload as unknown as Record<string, unknown>);
+  if (!firstAttempt.response.ok || !firstAttempt.body?.session) {
+    const shouldRetryLegacy =
+      firstAttempt.response.status >= 400 &&
+      firstAttempt.response.status < 500 &&
+      (input.appDirectory !== undefined ||
+        input.backendDirectory !== undefined ||
+        input.expoBackendDirectory !== undefined ||
+        input.backendStartCommand !== undefined ||
+        input.expoBackendStartCommand !== undefined ||
+        input.startBackend !== undefined ||
+        input.startExpoBackend !== undefined ||
+        input.injectExpoPublicRuntimeBackendUrl !== undefined);
+
+    if (shouldRetryLegacy) {
+      const legacyAttempt = await postStart({
+        projectId: input.projectId,
+        repoUrl: input.repoUrl,
+        branch: input.branch,
+        install: input.install,
+        useTunnel: input.useTunnel
+      });
+
+      if (!legacyAttempt.response.ok || !legacyAttempt.body?.session) {
+        throw new Error(
+          await buildUpstreamError(legacyAttempt.response, "Failed to start dev session", legacyAttempt.body?.error)
+        );
+      }
+
+      return legacyAttempt.body.session;
+    }
+
+    throw new Error(await buildUpstreamError(firstAttempt.response, "Failed to start dev session", firstAttempt.body?.error));
+  }
+
+  return firstAttempt.body.session;
 }
 
 export async function getDevRunnerSessionStatus(sessionId: string, logLines = 200): Promise<DevSessionState> {

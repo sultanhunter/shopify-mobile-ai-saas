@@ -34,7 +34,7 @@ export function normalizeShopDomain(raw: string): string | null {
 }
 
 export function getAppBaseUrl(fallbackOrigin: string): string {
-  return process.env.APP_BASE_URL ?? fallbackOrigin;
+  return process.env.NEXTJS_APP_BASE_URL?.trim() || process.env.APP_BASE_URL?.trim() || fallbackOrigin;
 }
 
 export function getShopifyScopes(): string {

@@ -208,8 +208,8 @@ export function ProjectCreateForm() {
         ))}
       </select>
       <p className="muted">
-        This creates an Expo SDK {selectedSdk} scaffold (via create-expo-app), initializes AI context, and can auto-create a
-        GitHub repo.
+        This creates a workspace repo with `mobile/` (Expo SDK {selectedSdk}) and `expo-backend/` (Node runtime API), initializes
+        AI context, and can auto-create a GitHub repo.
       </p>
       {error ? <p className="error-text">{error}</p> : null}
       {taskStatus ? <p className="meta-line">Task: {taskStatus}</p> : null}

@@ -2,7 +2,13 @@ interface ShopifyBaselineInput {
   projectId: string;
   projectName: string;
   shopDomain: string;
-  backendBaseUrl: string;
+  controlPlaneBaseUrl: string;
+  runtimeBackendBaseUrl: string;
+  mobileAppDir: string;
+  expoBackendDir?: string;
+  expoBackendPort?: number;
+  backendDir?: string;
+  backendPort?: number;
   brandColor: string;
 }
 
@@ -10,20 +16,49 @@ function escapeTemplateLiteral(value: string): string {
   return value.replace(/`/g, "\\`");
 }
 
+function normalizeWorkspaceDir(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === "." || trimmed === "./") {
+    return ".";
+  }
+
+  return trimmed.replace(/^\.\//, "").replace(/\/$/, "") || fallback;
+}
+
+function toWorkspacePath(rootDir: string, childPath: string): string {
+  if (rootDir === ".") {
+    return childPath;
+  }
+
+  return `${rootDir}/${childPath}`;
+}
+
+function resolveExpoBackendDir(input: ShopifyBaselineInput): string {
+  return normalizeWorkspaceDir(input.expoBackendDir ?? input.backendDir, "expo-backend");
+}
+
+function resolveExpoBackendPort(input: ShopifyBaselineInput): number {
+  const port = input.expoBackendPort ?? input.backendPort;
+  return Number.isFinite(port) && Number(port) > 0 ? Number(port) : 4100;
+}
+
 function renderAppLayout(): string {
   return `import { Stack } from "expo-router";
 import { CartProvider } from "../src/features/cart/cart-context";
+import { AuthProvider } from "../src/features/auth/auth-provider";
 import { ShopifyProvider } from "../src/features/shopify/shopify-provider";
 
 export default function RootLayout() {
   return (
     <ShopifyProvider>
-      <CartProvider>
-        <Stack screenOptions={{ headerBackTitle: "Back" }}>
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="product/[handle]" options={{ title: "Product" }} />
-        </Stack>
-      </CartProvider>
+      <AuthProvider>
+        <CartProvider>
+          <Stack screenOptions={{ headerBackTitle: "Back" }}>
+            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+            <Stack.Screen name="product/[handle]" options={{ title: "Product" }} />
+          </Stack>
+        </CartProvider>
+      </AuthProvider>
     </ShopifyProvider>
   );
 }
@@ -39,6 +74,7 @@ export default function TabsLayout() {
       <Tabs.Screen name="index" options={{ title: "Home" }} />
       <Tabs.Screen name="search" options={{ title: "Products" }} />
       <Tabs.Screen name="cart" options={{ title: "Cart" }} />
+      <Tabs.Screen name="account" options={{ title: "Account" }} />
     </Tabs>
   );
 }
@@ -248,6 +284,168 @@ const styles = StyleSheet.create({
 `;
 }
 
+function renderAccountScreen(): string {
+  return `import { SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { AuthMethod } from "../../src/features/auth/types";
+import { useAuth } from "../../src/features/auth/auth-provider";
+
+function MethodButton({
+  label,
+  method,
+  activeMethod,
+  enabled,
+  onPress
+}: {
+  label: string;
+  method: AuthMethod;
+  activeMethod: AuthMethod;
+  enabled: boolean;
+  onPress: (method: AuthMethod) => void;
+}) {
+  const active = activeMethod === method;
+  return (
+    <TouchableOpacity
+      style={[styles.methodBtn, active && styles.methodBtnActive, !enabled && styles.methodBtnDisabled]}
+      disabled={!enabled}
+      onPress={() => onPress(method)}
+    >
+      <Text style={[styles.methodBtnLabel, active && styles.methodBtnLabelActive]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+export default function AccountScreen() {
+  const {
+    status,
+    session,
+    config,
+    error,
+    activeMethod,
+    setActiveMethod,
+    signIn,
+    completeSignIn,
+    signOut,
+    isLoading
+  } = useAuth();
+
+  return (
+    <SafeAreaView style={styles.safe}>
+      <ScrollView contentContainerStyle={styles.content}>
+        <Text style={styles.heading}>Account</Text>
+        <Text style={styles.meta}>Status: {status}</Text>
+        <Text style={styles.meta}>Active method: {activeMethod}</Text>
+
+        <View style={styles.methodsWrap}>
+          <MethodButton
+            label="Hosted"
+            method="shopify_hosted"
+            activeMethod={activeMethod}
+            enabled={config.supportedMethods.includes("shopify_hosted")}
+            onPress={setActiveMethod}
+          />
+          <MethodButton
+            label="Customer API"
+            method="customer_account_api"
+            activeMethod={activeMethod}
+            enabled={config.supportedMethods.includes("customer_account_api")}
+            onPress={setActiveMethod}
+          />
+        </View>
+
+        <TouchableOpacity style={styles.primaryBtn} disabled={isLoading} onPress={() => void signIn()}>
+          <Text style={styles.primaryBtnLabel}>{isLoading ? "Working..." : "Sign in"}</Text>
+        </TouchableOpacity>
+
+        {status === "awaiting_completion" ? (
+          <TouchableOpacity style={styles.secondaryBtn} disabled={isLoading} onPress={() => void completeSignIn()}>
+            <Text style={styles.secondaryBtnLabel}>I finished in browser, continue</Text>
+          </TouchableOpacity>
+        ) : null}
+
+        {session ? (
+          <TouchableOpacity style={styles.secondaryBtn} disabled={isLoading} onPress={() => void signOut()}>
+            <Text style={styles.secondaryBtnLabel}>Sign out</Text>
+          </TouchableOpacity>
+        ) : null}
+
+        {error ? <Text style={styles.error}>{error}</Text> : null}
+
+        {session ? (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Session</Text>
+            <Text style={styles.cardText}>Method: {session.method}</Text>
+            <Text style={styles.cardText}>Signed in at: {session.signedInAt ?? "n/a"}</Text>
+            <Text style={styles.cardText}>Token scope: {session.tokens?.scope ?? "n/a"}</Text>
+            <Text style={styles.cardText}>Expires: {session.tokens?.expiresAt ?? "n/a"}</Text>
+          </View>
+        ) : null}
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Detected store setup</Text>
+          <Text style={styles.cardText}>Hosted account type: {config.hosted.accountType}</Text>
+          <Text style={styles.cardText}>Hosted enabled: {String(config.hosted.accountsEnabled)}</Text>
+          <Text style={styles.cardText}>Customer API enabled: {String(config.customerAccountApi.enabled)}</Text>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: "#f8fafc" },
+  content: { padding: 14, gap: 10 },
+  heading: { fontSize: 24, fontWeight: "700", color: "#0f172a" },
+  meta: { color: "#334155" },
+  methodsWrap: { flexDirection: "row", gap: 8 },
+  methodBtn: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#ffffff",
+    paddingHorizontal: 12,
+    paddingVertical: 10
+  },
+  methodBtnActive: {
+    borderColor: "#0f766e",
+    backgroundColor: "#ccfbf1"
+  },
+  methodBtnDisabled: {
+    opacity: 0.5
+  },
+  methodBtnLabel: { color: "#0f172a", fontWeight: "600" },
+  methodBtnLabelActive: { color: "#115e59" },
+  primaryBtn: {
+    marginTop: 6,
+    backgroundColor: "#0f766e",
+    borderRadius: 10,
+    alignItems: "center",
+    paddingVertical: 12
+  },
+  primaryBtnLabel: { color: "#ffffff", fontWeight: "700", fontSize: 16 },
+  secondaryBtn: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#ffffff",
+    alignItems: "center",
+    paddingVertical: 10
+  },
+  secondaryBtnLabel: { color: "#0f172a", fontWeight: "600" },
+  error: { color: "#b91c1c" },
+  card: {
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#ffffff",
+    borderRadius: 12,
+    padding: 12,
+    gap: 6
+  },
+  cardTitle: { fontSize: 16, fontWeight: "700", color: "#0f172a" },
+  cardText: { color: "#334155" }
+});
+`;
+}
+
 function renderProductScreen(): string {
   return `import { useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
@@ -352,11 +550,19 @@ const styles = StyleSheet.create({
 }
 
 function renderStoreConfig(input: ShopifyBaselineInput): string {
-  return `export const storeConfig = {
+  return `const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+
+export const storeConfig = {
   projectId: ${JSON.stringify(input.projectId)},
   projectName: ${JSON.stringify(input.projectName)},
   shopDomain: ${JSON.stringify(input.shopDomain)},
-  backendBaseUrl: ${JSON.stringify(input.backendBaseUrl)},
+  controlPlaneBaseUrl: ${JSON.stringify(input.controlPlaneBaseUrl)},
+  expoBackendBaseUrl:
+    env?.EXPO_PUBLIC_RUNTIME_BACKEND_URL?.trim() ||
+    ${JSON.stringify(input.runtimeBackendBaseUrl)},
+  runtimeBackendBaseUrl:
+    env?.EXPO_PUBLIC_RUNTIME_BACKEND_URL?.trim() ||
+    ${JSON.stringify(input.runtimeBackendBaseUrl)},
   brandColor: ${JSON.stringify(input.brandColor)}
 } as const;
 `;
@@ -383,12 +589,12 @@ function renderShopifyApi(): string {
 import { ProductDetail, ProductSummary } from "./types";
 
 function apiUrl(path: string): string {
-  const root = storeConfig.backendBaseUrl.replace(/\\/$/, "");
+  const root = (storeConfig.expoBackendBaseUrl || storeConfig.runtimeBackendBaseUrl).replace(/\\/$/, "");
   return root + path;
 }
 
 export async function fetchCatalog(): Promise<ProductSummary[]> {
-  const response = await fetch(apiUrl("/api/projects/" + storeConfig.projectId + "/shopify/catalog"));
+  const response = await fetch(apiUrl("/api/catalog"));
   const payload = (await response.json().catch(() => null)) as
     | { products?: ProductSummary[]; error?: string }
     | null;
@@ -401,9 +607,7 @@ export async function fetchCatalog(): Promise<ProductSummary[]> {
 }
 
 export async function fetchProductByHandle(handle: string): Promise<ProductDetail> {
-  const response = await fetch(
-    apiUrl("/api/projects/" + storeConfig.projectId + "/shopify/products/" + encodeURIComponent(handle))
-  );
+  const response = await fetch(apiUrl("/api/products/" + encodeURIComponent(handle)));
   const payload = (await response.json().catch(() => null)) as
     | { product?: ProductDetail; error?: string }
     | null;
@@ -417,24 +621,447 @@ export async function fetchProductByHandle(handle: string): Promise<ProductDetai
 `;
 }
 
-const REQUIRED_BASELINE_FILES = [
-  "app/_layout.tsx",
-  "app/(tabs)/index.tsx",
-  "app/(tabs)/search.tsx",
-  "app/(tabs)/cart.tsx",
-  "app/product/[handle].tsx",
-  "src/features/shopify/api.ts",
-  "src/features/shopify/shopify-provider.tsx",
-  "src/features/cart/cart-context.tsx"
-];
+function renderRuntimeBackendPackageJson(): string {
+  return JSON.stringify(
+    {
+      name: "shopify-mobile-expo-backend",
+      private: true,
+      type: "module",
+      scripts: {
+        dev: "node --watch src/index.js",
+        start: "node src/index.js"
+      },
+      dependencies: {
+        cors: "^2.8.5",
+        dotenv: "^16.4.5",
+        express: "^4.19.2"
+      }
+    },
+    null,
+    2
+  );
+}
+
+function renderRuntimeBackendGitIgnore(): string {
+  return `node_modules/
+.env
+`;
+}
+
+function renderRuntimeBackendEnvExample(input: ShopifyBaselineInput): string {
+  return `PORT=${resolveExpoBackendPort(input)}
+PROJECT_ID=${input.projectId}
+CONTROL_PLANE_BASE_URL=${input.controlPlaneBaseUrl}
+API_TIMEOUT_MS=15000
+
+# Optional shared secret to call control-plane APIs
+BACKEND_AUTH_TOKEN=
+`;
+}
+
+function renderRuntimeBackendReadme(input: ShopifyBaselineInput): string {
+  return `# Expo Backend
+
+This backend powers the generated Expo storefront app for project \`${input.projectId}\`.
+
+## What this service does
+
+- Exposes mobile-friendly API endpoints for catalog and customer auth
+- Keeps backend logic in the workspace instead of the SaaS frontend server
+- Uses adapter modules so auth implementations can be swapped later
+
+## Start locally
+
+1. Copy environment file
+
+\`\`\`bash
+cp .env.example .env
+\`\`\`
+
+2. Install dependencies
+
+\`\`\`bash
+npm install
+\`\`\`
+
+3. Start expo backend
+
+\`\`\`bash
+npm run dev
+\`\`\`
+
+The API starts on \`http://localhost:4100\` by default.
+
+## Endpoints
+
+- \`GET /api/health\`
+- \`GET /api/catalog\`
+- \`GET /api/products/:handle\`
+- \`GET /api/customer-auth/config\`
+- \`POST /api/customer-auth/method\`
+- \`POST /api/customer-auth/start\`
+- \`GET /api/customer-auth/session/:sessionId\`
+- \`POST /api/customer-auth/refresh\`
+`;
+}
+
+function renderRuntimeBackendConfig(input: ShopifyBaselineInput): string {
+  return `import dotenv from "dotenv";
+
+dotenv.config();
+
+const DEFAULT_PROJECT_ID = ${JSON.stringify(input.projectId)};
+const DEFAULT_CONTROL_PLANE_BASE_URL = ${JSON.stringify(input.controlPlaneBaseUrl)};
+const DEFAULT_PORT = ${resolveExpoBackendPort(input)};
+const DEFAULT_TIMEOUT_MS = 15000;
+
+function asString(value, fallback) {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  return trimmed || fallback;
+}
+
+function asNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export const runtimeConfig = {
+  port: asNumber(process.env.PORT, DEFAULT_PORT),
+  projectId: asString(process.env.PROJECT_ID, DEFAULT_PROJECT_ID),
+  controlPlaneBaseUrl: asString(process.env.CONTROL_PLANE_BASE_URL, DEFAULT_CONTROL_PLANE_BASE_URL).replace(/\\/$/, ""),
+  timeoutMs: asNumber(process.env.API_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+  backendAuthToken: process.env.BACKEND_AUTH_TOKEN?.trim() || undefined
+};
+
+if (!runtimeConfig.projectId) {
+  throw new Error("PROJECT_ID is required for expo backend.");
+}
+
+if (!runtimeConfig.controlPlaneBaseUrl || !/^https?:\\/\\//.test(runtimeConfig.controlPlaneBaseUrl)) {
+  throw new Error("CONTROL_PLANE_BASE_URL must be a valid http(s) URL.");
+}
+`;
+}
+
+function renderRuntimeBackendHttpClient(): string {
+  return `export async function requestJson(url, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 15000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message = payload && typeof payload === "object" && "error" in payload
+        ? payload.error
+        : "Request failed with status " + response.status;
+      throw new Error(typeof message === "string" ? message : "Request failed");
+    }
+
+    return payload;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Request timed out after " + Math.round(timeoutMs / 1000) + "s");
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+`;
+}
+
+function renderRuntimeBackendControlPlaneClient(): string {
+  return `import { requestJson } from "./http-client.js";
+
+export function createControlPlaneClient(config) {
+  const base = config.controlPlaneBaseUrl.replace(/\\/$/, "");
+
+  function request(path, options = {}) {
+    const headers = {
+      Accept: "application/json",
+      ...(options.headers || {})
+    };
+
+    if (config.backendAuthToken) {
+      headers.Authorization = "Bearer " + config.backendAuthToken;
+    }
+
+    return requestJson(base + path, {
+      ...options,
+      headers,
+      timeoutMs: config.timeoutMs
+    });
+  }
+
+  const projectPath = "/api/projects/" + encodeURIComponent(config.projectId);
+
+  return {
+    fetchCatalog: () => request(projectPath + "/shopify/catalog", { method: "GET" }),
+    fetchProductByHandle: (handle) =>
+      request(projectPath + "/shopify/products/" + encodeURIComponent(handle), { method: "GET" }),
+    fetchCustomerAuthConfig: () => request(projectPath + "/shopify/customer-auth/config", { method: "GET" }),
+    setActiveCustomerAuthMethod: (activeMethod) =>
+      request(projectPath + "/shopify/customer-auth/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ activeMethod })
+      }),
+    startCustomerAuth: () => request(projectPath + "/shopify/customer-auth/start", { method: "POST" }),
+    fetchCustomerAuthSession: (sessionId) =>
+      request(projectPath + "/shopify/customer-auth/session/" + encodeURIComponent(sessionId), { method: "GET" }),
+    refreshCustomerAuth: (refreshToken) =>
+      request(projectPath + "/shopify/customer-auth/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken })
+      })
+  };
+}
+`;
+}
+
+function renderRuntimeBackendCatalogAdapter(): string {
+  return `export function createCatalogAdapter(controlPlaneClient) {
+  return {
+    async getCatalog() {
+      const payload = await controlPlaneClient.fetchCatalog();
+      return {
+        shopDomain: typeof payload?.shopDomain === "string" ? payload.shopDomain : undefined,
+        products: Array.isArray(payload?.products) ? payload.products : []
+      };
+    },
+    async getProductByHandle(handle) {
+      return controlPlaneClient.fetchProductByHandle(handle);
+    }
+  };
+}
+`;
+}
+
+function renderRuntimeBackendCustomerAuthAdapter(): string {
+  return `function normalizeConfig(payload) {
+  const auth = payload && typeof payload === "object" && "auth" in payload ? payload.auth : null;
+  if (!auth || typeof auth !== "object") {
+    throw new Error("Invalid customer auth payload from control plane.");
+  }
+
+  return {
+    ...auth,
+    endpoints: {
+      start: "/api/customer-auth/start",
+      sessionBase: "/api/customer-auth/session",
+      refresh: "/api/customer-auth/refresh"
+    }
+  };
+}
+
+export function createCustomerAuthAdapter(controlPlaneClient) {
+  return {
+    async getConfig() {
+      const payload = await controlPlaneClient.fetchCustomerAuthConfig();
+      return normalizeConfig(payload);
+    },
+    async setMethod(activeMethod) {
+      return controlPlaneClient.setActiveCustomerAuthMethod(activeMethod);
+    },
+    async start() {
+      return controlPlaneClient.startCustomerAuth();
+    },
+    async getSession(sessionId) {
+      return controlPlaneClient.fetchCustomerAuthSession(sessionId);
+    },
+    async refresh(refreshToken) {
+      return controlPlaneClient.refreshCustomerAuth(refreshToken);
+    }
+  };
+}
+`;
+}
+
+function renderRuntimeBackendServer(): string {
+  return `import cors from "cors";
+import express from "express";
+import { runtimeConfig } from "./config.js";
+import { createCatalogAdapter } from "./adapters/catalog-adapter.js";
+import { createCustomerAuthAdapter } from "./adapters/customer-auth-adapter.js";
+import { createControlPlaneClient } from "./lib/control-plane-client.js";
+
+const app = express();
+
+app.use(
+  cors({
+    origin: true,
+    credentials: false
+  })
+);
+app.use(express.json({ limit: "1mb" }));
+
+const controlPlaneClient = createControlPlaneClient(runtimeConfig);
+const catalogAdapter = createCatalogAdapter(controlPlaneClient);
+const customerAuthAdapter = createCustomerAuthAdapter(controlPlaneClient);
+
+function asErrorMessage(caught) {
+  return caught instanceof Error ? caught.message : "Request failed";
+}
+
+function asyncRoute(handler) {
+  return (request, response) => {
+    Promise.resolve(handler(request, response)).catch((caught) => {
+      response.status(500).json({ error: asErrorMessage(caught) });
+    });
+  };
+}
+
+app.get("/api/health", (_request, response) => {
+  response.json({
+    status: "ok",
+    projectId: runtimeConfig.projectId,
+    controlPlaneBaseUrl: runtimeConfig.controlPlaneBaseUrl
+  });
+});
+
+app.get(
+  "/api/catalog",
+  asyncRoute(async (_request, response) => {
+    const payload = await catalogAdapter.getCatalog();
+    response.json(payload);
+  })
+);
+
+app.get(
+  "/api/products/:handle",
+  asyncRoute(async (request, response) => {
+    const handle = request.params.handle?.trim();
+    if (!handle) {
+      response.status(400).json({ error: "Product handle is required." });
+      return;
+    }
+
+    const payload = await catalogAdapter.getProductByHandle(handle);
+    response.json(payload);
+  })
+);
+
+app.get(
+  "/api/customer-auth/config",
+  asyncRoute(async (_request, response) => {
+    const auth = await customerAuthAdapter.getConfig();
+    response.json({ auth });
+  })
+);
+
+app.post(
+  "/api/customer-auth/method",
+  asyncRoute(async (request, response) => {
+    const activeMethod = typeof request.body?.activeMethod === "string" ? request.body.activeMethod : "";
+    if (activeMethod !== "shopify_hosted" && activeMethod !== "customer_account_api") {
+      response.status(400).json({ error: "activeMethod must be shopify_hosted or customer_account_api." });
+      return;
+    }
+
+    const payload = await customerAuthAdapter.setMethod(activeMethod);
+    response.json(payload ?? { ok: true });
+  })
+);
+
+app.post(
+  "/api/customer-auth/start",
+  asyncRoute(async (_request, response) => {
+    const payload = await customerAuthAdapter.start();
+    response.json(payload);
+  })
+);
+
+app.get(
+  "/api/customer-auth/session/:sessionId",
+  asyncRoute(async (request, response) => {
+    const sessionId = request.params.sessionId?.trim();
+    if (!sessionId) {
+      response.status(400).json({ error: "sessionId is required." });
+      return;
+    }
+
+    const payload = await customerAuthAdapter.getSession(sessionId);
+    response.json(payload);
+  })
+);
+
+app.post(
+  "/api/customer-auth/refresh",
+  asyncRoute(async (request, response) => {
+    const refreshToken = typeof request.body?.refreshToken === "string" ? request.body.refreshToken.trim() : "";
+    if (!refreshToken) {
+      response.status(400).json({ error: "refreshToken is required." });
+      return;
+    }
+
+    const payload = await customerAuthAdapter.refresh(refreshToken);
+    response.json(payload);
+  })
+);
+
+const server = app.listen(runtimeConfig.port, () => {
+  console.log("Expo backend listening on port", runtimeConfig.port);
+});
+
+function shutdown() {
+  server.close(() => {
+    process.exit(0);
+  });
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+`;
+}
+
+function getRequiredBaselineFiles(input: ShopifyBaselineInput): string[] {
+  const mobileAppDir = normalizeWorkspaceDir(input.mobileAppDir, "mobile");
+  const expoBackendDir = resolveExpoBackendDir(input);
+
+  return [
+    toWorkspacePath(mobileAppDir, "app/_layout.tsx"),
+    toWorkspacePath(mobileAppDir, "app/(tabs)/index.tsx"),
+    toWorkspacePath(mobileAppDir, "app/(tabs)/search.tsx"),
+    toWorkspacePath(mobileAppDir, "app/(tabs)/cart.tsx"),
+    toWorkspacePath(mobileAppDir, "app/(tabs)/account.tsx"),
+    toWorkspacePath(mobileAppDir, "app/product/[handle].tsx"),
+    toWorkspacePath(mobileAppDir, "src/features/shopify/api.ts"),
+    toWorkspacePath(mobileAppDir, "src/features/shopify/shopify-provider.tsx"),
+    toWorkspacePath(mobileAppDir, "src/features/cart/cart-context.tsx"),
+    toWorkspacePath(mobileAppDir, "src/features/auth/auth-provider.tsx"),
+    toWorkspacePath(mobileAppDir, "src/features/auth/auth-config.ts"),
+    toWorkspacePath(mobileAppDir, "src/features/auth/types.ts"),
+    toWorkspacePath(mobileAppDir, "src/features/auth/strategies/base.ts"),
+    toWorkspacePath(mobileAppDir, "src/features/auth/strategies/shopify-hosted.ts"),
+    toWorkspacePath(mobileAppDir, "src/features/auth/strategies/customer-account-api.ts"),
+    toWorkspacePath(expoBackendDir, "package.json"),
+    toWorkspacePath(expoBackendDir, "src/index.js"),
+    toWorkspacePath(expoBackendDir, "src/config.js"),
+    toWorkspacePath(expoBackendDir, "src/lib/control-plane-client.js"),
+    toWorkspacePath(expoBackendDir, "src/adapters/catalog-adapter.js"),
+    toWorkspacePath(expoBackendDir, "src/adapters/customer-auth-adapter.js")
+  ];
+}
 
 const FORBIDDEN_PATTERNS = [
   "replace(//$/",
   "undefined (reading 'body')"
 ];
 
-export function validateShopifyBaselineFiles(files: Record<string, string>): void {
-  for (const requiredPath of REQUIRED_BASELINE_FILES) {
+export function validateShopifyBaselineFiles(files: Record<string, string>, input: ShopifyBaselineInput): void {
+  for (const requiredPath of getRequiredBaselineFiles(input)) {
     if (typeof files[requiredPath] !== "string" || files[requiredPath].trim().length === 0) {
       throw new Error(`Shopify baseline validation failed: missing required file ${requiredPath}`);
     }
@@ -523,6 +1150,434 @@ export function useShopify(): ShopifyContextValue {
   const context = useContext(ShopifyContext);
   if (!context) {
     throw new Error("useShopify must be used inside ShopifyProvider");
+  }
+
+  return context;
+}
+`;
+}
+
+function renderAuthTypes(): string {
+  return `export type AuthMethod = "shopify_hosted" | "customer_account_api";
+
+export type AuthStatus =
+  | "idle"
+  | "loading_config"
+  | "signed_out"
+  | "signing_in"
+  | "awaiting_completion"
+  | "signed_in"
+  | "error";
+
+export interface AuthTokens {
+  accessToken: string;
+  refreshToken?: string;
+  idToken?: string;
+  tokenType?: string;
+  scope?: string;
+  expiresAt?: string;
+}
+
+export interface AuthSession {
+  method: AuthMethod;
+  tokens?: AuthTokens;
+  signedInAt?: string;
+}
+
+export interface CustomerAuthRemoteConfig {
+  activeMethod: AuthMethod;
+  recommendedMethod: AuthMethod;
+  supportedMethods: AuthMethod[];
+  hosted: {
+    accountsEnabled: boolean;
+    accountType: "new" | "legacy" | "disabled" | "unknown";
+    loginUrl: string;
+    accountUrl: string;
+  };
+  customerAccountApi: {
+    enabled: boolean;
+    hasClientId: boolean;
+    scopes: string[];
+    issuer?: string;
+    authorizationEndpoint?: string;
+    tokenEndpoint?: string;
+  };
+  endpoints: {
+    start: string;
+    sessionBase: string;
+    refresh: string;
+  };
+}
+
+export interface CustomerAuthConfigResponse {
+  auth: CustomerAuthRemoteConfig;
+}
+`;
+}
+
+function renderAuthConfig(): string {
+  return `import { storeConfig } from "../shopify/store-config";
+import { AuthMethod, CustomerAuthConfigResponse, CustomerAuthRemoteConfig } from "./types";
+
+const API_BASE = (storeConfig.expoBackendBaseUrl || storeConfig.runtimeBackendBaseUrl).replace(/\\/$/, "");
+
+function absolute(path: string): string {
+  if (path.startsWith("http://") || path.startsWith("https://")) {
+    return path;
+  }
+
+  return API_BASE + path;
+}
+
+export async function fetchCustomerAuthConfig(): Promise<CustomerAuthRemoteConfig> {
+  const response = await fetch(absolute("/api/customer-auth/config"), {
+    method: "GET"
+  });
+
+  const payload = (await response.json().catch(() => null)) as
+    | CustomerAuthConfigResponse
+    | { error?: string }
+    | null;
+
+  if (!response.ok || !payload || !("auth" in payload)) {
+    throw new Error((payload && "error" in payload && payload.error) || "Failed to load customer auth config");
+  }
+
+  return payload.auth;
+}
+
+export async function updateActiveAuthMethod(method: AuthMethod): Promise<void> {
+  const response = await fetch(absolute("/api/customer-auth/method"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      activeMethod: method
+    })
+  });
+
+  const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+  if (!response.ok) {
+    throw new Error(payload?.error ?? "Failed to update active auth method");
+  }
+}
+
+export function resolveAuthUrl(path: string): string {
+  return absolute(path);
+}
+`;
+}
+
+function renderAuthStrategyBase(): string {
+  return `import { AuthSession, AuthStatus, CustomerAuthRemoteConfig } from "../types";
+
+export interface AuthStrategyContext {
+  config: CustomerAuthRemoteConfig;
+  setStatus: (status: AuthStatus) => void;
+  setError: (message: string | null) => void;
+  setSession: (session: AuthSession | undefined) => void;
+}
+
+export interface AuthStrategy {
+  signIn: () => Promise<void>;
+  completeSignIn: () => Promise<boolean>;
+  signOut: () => Promise<void>;
+}
+`;
+}
+
+function renderHostedAuthStrategy(): string {
+  return `import { Linking } from "react-native";
+import { AuthStrategy, AuthStrategyContext } from "./base";
+
+export function createHostedAuthStrategy(context: AuthStrategyContext): AuthStrategy {
+  return {
+    signIn: async () => {
+      context.setStatus("signing_in");
+      context.setError(null);
+      await Linking.openURL(context.config.hosted.loginUrl);
+      context.setStatus("signed_out");
+    },
+    completeSignIn: async () => {
+      return false;
+    },
+    signOut: async () => {
+      context.setSession(undefined);
+      context.setStatus("signed_out");
+      context.setError(null);
+    }
+  };
+}
+`;
+}
+
+function renderCustomerApiAuthStrategy(): string {
+  return `import { Linking } from "react-native";
+import { AuthSession } from "../types";
+import { resolveAuthUrl } from "../auth-config";
+import { AuthStrategy, AuthStrategyContext } from "./base";
+
+let pendingSessionId: string | undefined;
+
+interface StartPayload {
+  sessionId?: string;
+  authUrl?: string;
+  error?: string;
+}
+
+interface SessionStatusPayload {
+  status?: "pending" | "completed" | "failed" | "expired" | "consumed";
+  tokens?: AuthSession["tokens"];
+  error?: string;
+}
+
+export function createCustomerApiAuthStrategy(context: AuthStrategyContext): AuthStrategy {
+  return {
+    signIn: async () => {
+      context.setStatus("signing_in");
+      context.setError(null);
+
+      const startResponse = await fetch(resolveAuthUrl(context.config.endpoints.start), {
+        method: "POST"
+      });
+      const startPayload = (await startResponse.json().catch(() => null)) as StartPayload | null;
+      if (!startResponse.ok || !startPayload?.sessionId || !startPayload.authUrl) {
+        context.setStatus("error");
+        throw new Error(startPayload?.error ?? "Failed to start customer auth");
+      }
+
+      pendingSessionId = startPayload.sessionId;
+      context.setStatus("awaiting_completion");
+      await Linking.openURL(startPayload.authUrl);
+    },
+    completeSignIn: async () => {
+      if (!pendingSessionId) {
+        return false;
+      }
+
+      const response = await fetch(
+        resolveAuthUrl(context.config.endpoints.sessionBase + "/" + encodeURIComponent(pendingSessionId)),
+        {
+          method: "GET"
+        }
+      );
+
+      const payload = (await response.json().catch(() => null)) as SessionStatusPayload | null;
+      if (!response.ok || !payload?.status) {
+        context.setStatus("error");
+        context.setError(payload?.error ?? "Failed to check auth status");
+        return false;
+      }
+
+      if (payload.status === "pending") {
+        context.setStatus("awaiting_completion");
+        return false;
+      }
+
+      if (payload.status === "completed" && payload.tokens?.accessToken) {
+        context.setSession({
+          method: "customer_account_api",
+          tokens: payload.tokens,
+          signedInAt: new Date().toISOString()
+        });
+        context.setStatus("signed_in");
+        context.setError(null);
+        pendingSessionId = undefined;
+        return true;
+      }
+
+      context.setStatus("error");
+      context.setError(payload.error ?? "Customer auth did not complete");
+      if (payload.status !== "pending") {
+        pendingSessionId = undefined;
+      }
+      return false;
+    },
+    signOut: async () => {
+      pendingSessionId = undefined;
+      context.setSession(undefined);
+      context.setStatus("signed_out");
+      context.setError(null);
+    }
+  };
+}
+`;
+}
+
+function renderAuthProvider(): string {
+  return `import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { AppState } from "react-native";
+import { fetchCustomerAuthConfig, updateActiveAuthMethod } from "./auth-config";
+import { createCustomerApiAuthStrategy } from "./strategies/customer-account-api";
+import { createHostedAuthStrategy } from "./strategies/shopify-hosted";
+import { AuthMethod, AuthSession, AuthStatus, CustomerAuthRemoteConfig } from "./types";
+
+interface AuthContextValue {
+  status: AuthStatus;
+  session?: AuthSession;
+  config: CustomerAuthRemoteConfig;
+  error: string | null;
+  activeMethod: AuthMethod;
+  isLoading: boolean;
+  setActiveMethod: (method: AuthMethod) => void;
+  signIn: () => Promise<void>;
+  completeSignIn: () => Promise<boolean>;
+  signOut: () => Promise<void>;
+}
+
+const FALLBACK_CONFIG: CustomerAuthRemoteConfig = {
+  activeMethod: "shopify_hosted",
+  recommendedMethod: "shopify_hosted",
+  supportedMethods: ["shopify_hosted"],
+  hosted: {
+    accountsEnabled: true,
+    accountType: "unknown",
+    loginUrl: "",
+    accountUrl: ""
+  },
+  customerAccountApi: {
+    enabled: false,
+    hasClientId: false,
+    scopes: []
+  },
+  endpoints: {
+    start: "",
+    sessionBase: "",
+    refresh: ""
+  }
+};
+
+const AuthContext = createContext<AuthContextValue | null>(null);
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [status, setStatus] = useState<AuthStatus>("loading_config");
+  const [config, setConfig] = useState<CustomerAuthRemoteConfig>(FALLBACK_CONFIG);
+  const [session, setSession] = useState<AuthSession | undefined>();
+  const [error, setError] = useState<string | null>(null);
+  const [activeMethod, setActiveMethodState] = useState<AuthMethod>("shopify_hosted");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const remote = await fetchCustomerAuthConfig();
+        if (cancelled) return;
+
+        setConfig(remote);
+        setActiveMethodState(remote.activeMethod);
+        setStatus("signed_out");
+      } catch (caught) {
+        if (cancelled) return;
+        setError(caught instanceof Error ? caught.message : "Failed to load auth config");
+        setStatus("error");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const strategyContext = useMemo(
+    () => ({
+      config,
+      setStatus,
+      setError,
+      setSession
+    }),
+    [config]
+  );
+
+  const strategy = useMemo(() => {
+    if (activeMethod === "customer_account_api") {
+      return createCustomerApiAuthStrategy(strategyContext);
+    }
+
+    return createHostedAuthStrategy(strategyContext);
+  }, [activeMethod, strategyContext]);
+
+  const setActiveMethod = useCallback(
+    (method: AuthMethod) => {
+      if (!config.supportedMethods.includes(method)) {
+        return;
+      }
+
+      setActiveMethodState(method);
+      setStatus("signed_out");
+      setSession(undefined);
+      setError(null);
+      void updateActiveAuthMethod(method).catch(() => {
+        // local method remains selected even if backend persistence fails
+      });
+    },
+    [config.supportedMethods]
+  );
+
+  const signIn = useCallback(async () => {
+    try {
+      await strategy.signIn();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Sign-in failed");
+      setStatus("error");
+    }
+  }, [strategy]);
+
+  const completeSignIn = useCallback(async () => {
+    try {
+      return await strategy.completeSignIn();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Sign-in completion failed");
+      setStatus("error");
+      return false;
+    }
+  }, [strategy]);
+
+  const signOut = useCallback(async () => {
+    try {
+      await strategy.signOut();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Sign-out failed");
+      setStatus("error");
+    }
+  }, [strategy]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active" && status === "awaiting_completion") {
+        void completeSignIn();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [completeSignIn, status]);
+
+  const value = useMemo<AuthContextValue>(
+    () => ({
+      status,
+      session,
+      config,
+      error,
+      activeMethod,
+      isLoading: status === "loading_config" || status === "signing_in",
+      setActiveMethod,
+      signIn,
+      completeSignIn,
+      signOut
+    }),
+    [status, session, config, error, activeMethod, setActiveMethod, signIn, completeSignIn, signOut]
+  );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+export function useAuth(): AuthContextValue {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error("useAuth must be used inside AuthProvider");
   }
 
   return context;
@@ -620,27 +1675,50 @@ export function useCart(): CartContextValue {
 }
 
 export function renderShopifyBaselineFiles(input: ShopifyBaselineInput): Record<string, string> {
+  const mobileAppDir = normalizeWorkspaceDir(input.mobileAppDir, "mobile");
+  const expoBackendDir = resolveExpoBackendDir(input);
+
   return {
-    "app/_layout.tsx": renderAppLayout(),
-    "app/(tabs)/_layout.tsx": renderTabsLayout(),
-    "app/(tabs)/index.tsx": renderHomeScreen(),
-    "app/(tabs)/search.tsx": renderSearchScreen(),
-    "app/(tabs)/cart.tsx": renderCartScreen(),
-    "app/product/[handle].tsx": renderProductScreen(),
-    "src/features/shopify/store-config.ts": renderStoreConfig({
+    [toWorkspacePath(mobileAppDir, "app/_layout.tsx")]: renderAppLayout(),
+    [toWorkspacePath(mobileAppDir, "app/(tabs)/_layout.tsx")]: renderTabsLayout(),
+    [toWorkspacePath(mobileAppDir, "app/(tabs)/index.tsx")]: renderHomeScreen(),
+    [toWorkspacePath(mobileAppDir, "app/(tabs)/search.tsx")]: renderSearchScreen(),
+    [toWorkspacePath(mobileAppDir, "app/(tabs)/cart.tsx")]: renderCartScreen(),
+    [toWorkspacePath(mobileAppDir, "app/(tabs)/account.tsx")]: renderAccountScreen(),
+    [toWorkspacePath(mobileAppDir, "app/product/[handle].tsx")]: renderProductScreen(),
+    [toWorkspacePath(mobileAppDir, "src/features/shopify/store-config.ts")]: renderStoreConfig({
       ...input,
       projectName: escapeTemplateLiteral(input.projectName)
     }),
-    "src/features/shopify/types.ts": renderShopifyTypes(),
-    "src/features/shopify/api.ts": renderShopifyApi(),
-    "src/features/shopify/shopify-provider.tsx": renderShopifyProvider(),
-    "src/features/shopify/use-shopify-catalog.ts": renderCatalogHook(),
-    "src/features/cart/cart-context.tsx": renderCartContext(),
+    [toWorkspacePath(mobileAppDir, "src/features/shopify/types.ts")]: renderShopifyTypes(),
+    [toWorkspacePath(mobileAppDir, "src/features/shopify/api.ts")]: renderShopifyApi(),
+    [toWorkspacePath(mobileAppDir, "src/features/shopify/shopify-provider.tsx")]: renderShopifyProvider(),
+    [toWorkspacePath(mobileAppDir, "src/features/shopify/use-shopify-catalog.ts")]: renderCatalogHook(),
+    [toWorkspacePath(mobileAppDir, "src/features/auth/types.ts")]: renderAuthTypes(),
+    [toWorkspacePath(mobileAppDir, "src/features/auth/auth-config.ts")]: renderAuthConfig(),
+    [toWorkspacePath(mobileAppDir, "src/features/auth/strategies/base.ts")]: renderAuthStrategyBase(),
+    [toWorkspacePath(mobileAppDir, "src/features/auth/strategies/shopify-hosted.ts")]: renderHostedAuthStrategy(),
+    [toWorkspacePath(mobileAppDir, "src/features/auth/strategies/customer-account-api.ts")]: renderCustomerApiAuthStrategy(),
+    [toWorkspacePath(mobileAppDir, "src/features/auth/auth-provider.tsx")]: renderAuthProvider(),
+    [toWorkspacePath(mobileAppDir, "src/features/cart/cart-context.tsx")]: renderCartContext(),
+    [toWorkspacePath(expoBackendDir, "package.json")]: renderRuntimeBackendPackageJson(),
+    [toWorkspacePath(expoBackendDir, ".gitignore")]: renderRuntimeBackendGitIgnore(),
+    [toWorkspacePath(expoBackendDir, ".env.example")]: renderRuntimeBackendEnvExample(input),
+    [toWorkspacePath(expoBackendDir, "README.md")]: renderRuntimeBackendReadme(input),
+    [toWorkspacePath(expoBackendDir, "src/config.js")]: renderRuntimeBackendConfig(input),
+    [toWorkspacePath(expoBackendDir, "src/index.js")]: renderRuntimeBackendServer(),
+    [toWorkspacePath(expoBackendDir, "src/lib/http-client.js")]: renderRuntimeBackendHttpClient(),
+    [toWorkspacePath(expoBackendDir, "src/lib/control-plane-client.js")]: renderRuntimeBackendControlPlaneClient(),
+    [toWorkspacePath(expoBackendDir, "src/adapters/catalog-adapter.js")]: renderRuntimeBackendCatalogAdapter(),
+    [toWorkspacePath(expoBackendDir, "src/adapters/customer-auth-adapter.js")]: renderRuntimeBackendCustomerAuthAdapter(),
     ".shopify-baseline.json": JSON.stringify(
       {
-        version: 1,
+        version: 2,
         appliedAt: new Date().toISOString(),
-        shopDomain: input.shopDomain
+        shopDomain: input.shopDomain,
+        mobileAppDir,
+        expoBackendDir,
+        expoBackendPort: resolveExpoBackendPort(input)
       },
       null,
       2

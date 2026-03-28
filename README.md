@@ -15,9 +15,11 @@ This is a brand-new SaaS prototype that matches your requested flow:
 - GitHub REST API integration for repo creation + file commits
 - Provider-based LLM layer (`src/lib/llm.ts`) with Vertex-backed Gemini via external Node server
 - Shopify OAuth callback validation + token exchange + encrypted token storage
-- External Node AI server support for long-running Vertex generation jobs
+- External runner server support for long-running Vertex generation jobs
 - Expo scaffolding runs on external Node server using `create-expo-app` SDK 55 template
+- Shopify baseline now scaffolds a modular per-workspace Node expo backend (`expo-backend/`) for Expo app APIs
 - Node dev-session APIs for clone/install/expo-run/apply-and-push workflow
+- Workspace layout targets two apps: `mobile/` (Expo) and `expo-backend/` (Node API)
 
 ## Key Endpoints
 
@@ -29,8 +31,14 @@ This is a brand-new SaaS prototype that matches your requested flow:
 - `POST /api/projects/:projectId/messages` - run prompt -> update Expo files + preview + optional GitHub commit
 - `GET /api/shopify/auth?shop=...&projectId=...` - build Shopify OAuth URL with signed state
 - `GET /api/shopify/callback` - verify HMAC/state -> exchange token -> securely store per project
+- `GET /api/projects/:projectId/shopify/customer-auth/config` - resolve/store active customer auth strategy and endpoints
+- `POST /api/projects/:projectId/shopify/customer-auth/config` - set active customer auth strategy
+- `POST /api/projects/:projectId/shopify/customer-auth/start` - create Customer Account API session + OAuth URL
+- `GET /api/projects/:projectId/shopify/customer-auth/session/:sessionId` - poll Customer Account API auth completion
+- `POST /api/projects/:projectId/shopify/customer-auth/refresh` - refresh Customer Account API token
+- `GET /api/shopify/customer-auth/callback` - Customer Account API callback -> session completion page
 
-External Node server endpoints (`Desktop/skulptaApp/server`):
+External runner server endpoints (`Desktop/shopify-mobile-runner-server`):
 
 - `POST /api/shopify-mobile/dev-session/start` - clone repo, install deps, start Expo
 - `GET /api/shopify-mobile/dev-session/:sessionId/status` - fetch session status/logs/Expo URL
@@ -69,21 +77,31 @@ cp .env.example .env.local
 - Apply schema from `supabase/projects.sql` in your Supabase SQL editor
 - Set `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET`
 - Set `SHOPIFY_OAUTH_STATE_SECRET` and `SHOPIFY_TOKEN_ENCRYPTION_SECRET`
+- Optional Customer Account API vars for mobile customer login:
+  - `SHOPIFY_CUSTOMER_ACCOUNT_CLIENT_ID` (falls back to `SHOPIFY_API_KEY`)
+  - `SHOPIFY_CUSTOMER_ACCOUNT_SCOPES` (default `openid,email,profile`)
+- `SHOPIFY_CUSTOMER_AUTH_CALLBACK_URL` (defaults to `<NEXTJS_APP_BASE_URL>/api/shopify/customer-auth/callback`)
 - Set `GEMINI_API_KEY`
-- Set `APP_BASE_URL` to your public Next.js URL (used for Shopify OAuth redirect URL)
-- Set `MOBILE_BACKEND_BASE_URL` to the public URL/IP your Expo app should call for backend APIs
-- Set `AI_SERVER_BASE_URL` to your Node server (for example `http://localhost:3100`)
-- Set `AI_SERVER_TOKEN` to match `SHOPIFY_MOBILE_AI_SERVER_TOKEN` on the Node server
+- Set `NEXTJS_APP_BASE_URL` to your public Next.js URL (used for Shopify OAuth redirect URL)
+- Set `MOBILE_EXPO_BACKEND_BASE_URL` to the public URL/IP of each generated workspace expo backend (preferred)
+- Optional legacy alias: `MOBILE_RUNTIME_BACKEND_BASE_URL` (used when expo var is not set)
+- Optional legacy alias: `MOBILE_BACKEND_BASE_URL` (used when runtime var is not set)
+- Optional workspace layout envs for create-task payload:
+  - `WORKSPACE_MOBILE_APP_DIR` (default `mobile`)
+  - `WORKSPACE_EXPO_BACKEND_DIR` (default `expo-backend`)
+  - `WORKSPACE_EXPO_BACKEND_PORT` (default `4100`)
+- Set `RUNNER_SERVER_BASE_URL` to your runner server (for example `http://localhost:3100`)
+- Set `RUNNER_SERVER_TOKEN` to match `RUNNER_SERVER_TOKEN` on the runner server
 - Set `EXPO_SCAFFOLD_SERVER_BASE_URL` if scaffold service runs on a different server
-- Set `EXPO_SCAFFOLD_SERVER_TOKEN` if scaffold token differs from AI server token
+- Set `EXPO_SCAFFOLD_SERVER_TOKEN` if scaffold token differs from runner token
 - Optional: switch provider/model via `LLM_PROVIDER` and `LLM_MODEL`
 
-4. Configure the Node AI server (`/Users/sultanibneusman/Desktop/skulptaApp/server`)
+4. Configure the runner server (`/Users/sultanibneusman/Desktop/shopify-mobile-runner-server`)
 
 - Set `PORT=3100`
 - Set `VERTEX_API_KEY`
 - Set `VERTEX_MODEL` (default is `gemini-3.1-flash-lite-preview`)
-- Set `SHOPIFY_MOBILE_AI_SERVER_TOKEN` to a shared secret
+- Set `RUNNER_SERVER_TOKEN` to a shared secret
 - Ensure `npx` is available for `create-expo-app` scaffolding
 
 5. Install and run
@@ -115,16 +133,17 @@ Optional flags:
 
 The Node server now supports a developer-like loop:
 
-1. Start dev session (clone + install + Expo start)
+1. Start dev session (clone + install + start Expo app + start expo backend)
 2. Apply AI file edits into the live clone
 3. Commit and push back to GitHub
-4. Expo hot-reloads from the running dev session
+4. Expo hot-reloads from the running dev session and consumes expo backend URL
 
 This keeps Vercel lightweight while long-running build/watch work stays on persistent Node infrastructure.
 
 ## Notes
 
 - Shopify access tokens are encrypted before persisting in the local DB.
+- Generated Expo apps call their own workspace expo backend (`expo-backend/`), and that backend bridges to control-plane APIs.
 - `LLM_PROVIDER=vertex-server` is the recommended mode for Vercel deployments.
 - `LLM_PROVIDER=rule-based` is still available as a fallback provider for development.
 - Workspace preview supports a quick in-app preview and a Snack web preview mode.

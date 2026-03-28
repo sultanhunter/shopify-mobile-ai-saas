@@ -19,7 +19,7 @@ const OPERATIONAL_MESSAGE_PREFIXES = [
   "Project initialized.",
   "Ready. Prompt me",
   "Dev session started (",
-  "Dev session stopped.",
+  "Dev session stopped",
   "Dev session no longer exists on runner.",
   "Dev session was already gone on runner",
   "Dev session not found on runner during commit.",
@@ -76,6 +76,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
   const latestRun = project.runs[0];
   const devSession = project.devSession;
+  const customerAuth = project.store?.customerAuth;
   const hasActiveDevSession = Boolean(devSession && (devSession.status === "starting" || devSession.status === "ready"));
 
   const visibleMessages = useMemo(
@@ -382,7 +383,8 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
         },
         body: JSON.stringify({
           install: true,
-          useTunnel: true
+          useTunnel: true,
+          startExpoBackend: true
         })
       });
 
@@ -392,7 +394,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
       }
 
       setProject(payload.project);
-      setDevSessionFeedback("Dev session started. Waiting for preview URL...");
+      setDevSessionFeedback("Dev session started. Waiting for mobile and backend URLs...");
       void refreshRepoFiles();
     } catch (caught) {
       setDevSessionError(caught instanceof Error ? caught.message : "Failed to start dev session.");
@@ -512,6 +514,17 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
               Shopify OAuth failed{oauthReason ? ` (${oauthReason.replaceAll("_", " ")})` : ""}. Try again.
             </p>
           ) : null}
+          {customerAuth ? (
+            <p className="meta-line">
+              Customer auth: active `{customerAuth.activeMethod}`; recommended `{customerAuth.recommendedMethod}`.
+            </p>
+          ) : null}
+          {customerAuth?.hosted ? (
+            <p className="meta-line">
+              Hosted accounts: {customerAuth.hosted.accountsEnabled ? customerAuth.hosted.accountType : "disabled"};
+              Customer API: {customerAuth.customerAccountApi.enabled ? "available" : "unavailable"}.
+            </p>
+          ) : null}
         </div>
 
         <div className="chat-main">
@@ -571,6 +584,14 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
         <div className="run-meta">
           <h3>Global Console</h3>
           <p className="meta-line">Status: {devSession ? getDevSessionStatusLabel(devSession) : "not running"}</p>
+          {(devSession?.expoBackendStatus ?? devSession?.backendStatus) ? (
+            <p className="meta-line">Expo backend: {devSession?.expoBackendStatus ?? devSession?.backendStatus}</p>
+          ) : null}
+          {(devSession?.expoBackendUrl ?? devSession?.backendUrl) ? (
+            <p className="meta-line">
+              Expo backend URL: <a href={devSession?.expoBackendUrl ?? devSession?.backendUrl}>{devSession?.expoBackendUrl ?? devSession?.backendUrl}</a>
+            </p>
+          ) : null}
           <div className="inline-grid">
             <button className="button" disabled={isStartingDevSession || hasActiveDevSession} onClick={startDevSession} type="button">
               {isStartingDevSession ? "Starting..." : "Start"}
@@ -615,7 +636,15 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
             <summary>Project activity logs</summary>
             <div className="log-console">{projectActivityLogs.length ? projectActivityLogs.join("\n") : "No project activity yet."}</div>
           </details>
-          <div className="log-console">{devSession?.logs?.length ? devSession.logs.join("\n") : "No dev logs yet."}</div>
+          <div className="log-console">{devSession?.logs?.length ? devSession.logs.join("\n") : "No mobile dev logs yet."}</div>
+          <details className="log-details">
+            <summary>Expo backend logs</summary>
+            <div className="log-console">
+              {(devSession?.expoBackendLogs ?? devSession?.backendLogs)?.length
+                ? (devSession?.expoBackendLogs ?? devSession?.backendLogs)?.join("\n")
+                : "No expo backend logs yet."}
+            </div>
+          </details>
         </div>
 
         {showCodeViewer ? (

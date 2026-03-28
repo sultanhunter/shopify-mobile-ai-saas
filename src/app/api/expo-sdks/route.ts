@@ -14,7 +14,10 @@ interface RunnerSdkResponse {
 }
 
 function getScaffoldServerBaseUrl(): string {
-  const baseUrl = process.env.EXPO_SCAFFOLD_SERVER_BASE_URL?.trim() || process.env.AI_SERVER_BASE_URL?.trim();
+  const baseUrl =
+    process.env.EXPO_SCAFFOLD_SERVER_BASE_URL?.trim() ||
+    process.env.RUNNER_SERVER_BASE_URL?.trim() ||
+    process.env.AI_SERVER_BASE_URL?.trim();
   if (!baseUrl) {
     throw new Error("Scaffold server URL is missing.");
   }
@@ -24,7 +27,8 @@ function getScaffoldServerBaseUrl(): string {
 
 function buildHeaders(): HeadersInit {
   const headers: HeadersInit = {};
-  const token = (process.env.EXPO_SCAFFOLD_SERVER_TOKEN ?? process.env.AI_SERVER_TOKEN)?.trim();
+  const token =
+    (process.env.EXPO_SCAFFOLD_SERVER_TOKEN ?? process.env.RUNNER_SERVER_TOKEN ?? process.env.AI_SERVER_TOKEN)?.trim();
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
