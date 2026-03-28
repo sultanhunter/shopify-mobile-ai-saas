@@ -64,7 +64,7 @@ After scaffold generation, AI-generated files are layered on top of the base Exp
 cp .env.example .env.local
 ```
 
-2. (Optional) Configure GitHub sync
+2. Configure GitHub sync (required for dev sessions)
 
 - Set `GITHUB_TOKEN` (repo scope)
 - Set `GITHUB_OWNER` if you want repos created under an org/user explicitly
