@@ -121,6 +121,90 @@ function normalizeProject(value: unknown): Project | null {
   return project;
 }
 
+function mergeCustomerAuthSessions(
+  latestSessions: unknown,
+  updatedSessions: unknown
+): unknown {
+  const combined = new Map<string, Record<string, unknown>>();
+
+  const addSessions = (value: unknown) => {
+    if (!Array.isArray(value)) {
+      return;
+    }
+
+    for (const entry of value) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+
+      const record = entry as Record<string, unknown>;
+      const id = typeof record.id === "string" ? record.id : undefined;
+      if (!id) {
+        continue;
+      }
+
+      const previous = combined.get(id) ?? {};
+      combined.set(id, {
+        ...previous,
+        ...record,
+      });
+    }
+  };
+
+  addSessions(latestSessions);
+  addSessions(updatedSessions);
+
+  return combined.size > 0 ? [...combined.values()] : updatedSessions ?? latestSessions;
+}
+
+function mergeProjectForConcurrentUpdates(updatedProject: Project, latestProject: Project | null): Project {
+  if (!latestProject) {
+    return updatedProject;
+  }
+
+  const merged: Project = {
+    ...updatedProject,
+  };
+
+  if (!merged.store && latestProject.store) {
+    merged.store = latestProject.store;
+  }
+
+  if (merged.store && latestProject.store) {
+    merged.store = {
+      ...merged.store,
+      shopDomain: merged.store.shopDomain || latestProject.store.shopDomain,
+      accessTokenEncrypted: merged.store.accessTokenEncrypted || latestProject.store.accessTokenEncrypted,
+      accessToken: merged.store.accessToken || latestProject.store.accessToken,
+      customerAuth: merged.store.customerAuth || latestProject.store.customerAuth,
+    };
+
+    if (merged.store.customerAuth && latestProject.store.customerAuth) {
+      merged.store.customerAuth = {
+        ...latestProject.store.customerAuth,
+        ...merged.store.customerAuth,
+        customerAccountApi: {
+          ...latestProject.store.customerAuth.customerAccountApi,
+          ...merged.store.customerAuth.customerAccountApi,
+          clientId:
+            merged.store.customerAuth.customerAccountApi.clientId ||
+            latestProject.store.customerAuth.customerAccountApi.clientId,
+          scopes:
+            merged.store.customerAuth.customerAccountApi.scopes?.length
+              ? merged.store.customerAuth.customerAccountApi.scopes
+              : latestProject.store.customerAuth.customerAccountApi.scopes,
+        },
+        sessions: mergeCustomerAuthSessions(
+          latestProject.store.customerAuth.sessions,
+          merged.store.customerAuth.sessions
+        ) as typeof merged.store.customerAuth.sessions,
+      };
+    }
+  }
+
+  return merged;
+}
+
 async function fetchProjectRow(projectId: string): Promise<ProjectRow | null> {
   const { data, error } = await getSupabaseClient()
     .from(getProjectsTableName())
@@ -199,6 +283,12 @@ export async function updateProject(
     }
 
     updatedProject = updater(existingProject);
+
+    const latestRow = await fetchProjectRow(projectId);
+    const latestProject = latestRow ? normalizeProject(latestRow.project) : null;
+    if (updatedProject) {
+      updatedProject = mergeProjectForConcurrentUpdates(updatedProject, latestProject);
+    }
 
     const row: ProjectRow = {
       id: projectId,
