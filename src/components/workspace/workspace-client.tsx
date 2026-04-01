@@ -133,6 +133,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
   const branchName = project.github.defaultBranch ?? "main";
   const customerApiNeedsClientId = Boolean(customerAuth && !customerAuth.customerAccountApi.hasClientId);
+  const customerApiHasClientId = Boolean(customerAuth?.customerAccountApi.hasClientId);
   const mobileCodeRoot = useMemo(
     () => normalizeWorkspaceDir(project.workspaceLayout?.mobileAppDir, "mobile"),
     [project.workspaceLayout?.mobileAppDir]
@@ -633,11 +634,16 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
               Customer API: {customerAuth.customerAccountApi.enabled ? "available" : "unavailable"}.
             </p>
           ) : null}
-          {customerApiNeedsClientId ? (
+          {customerAuth ? (
             <>
               <p className="meta-line">
-                Customer Account API client ID is required for this store. Paste it once to enable customer OAuth.
+                Customer Account API client ID: {customerApiHasClientId ? "configured" : "missing"}.
               </p>
+              {customerApiNeedsClientId ? (
+                <p className="meta-line">Paste the store Customer Account API client ID to enable customer OAuth.</p>
+              ) : (
+                <p className="meta-line">If sign-in fails, paste a new client ID here to replace the current one.</p>
+              )}
               <input
                 className="text-input"
                 placeholder="Customer Account API client ID"
@@ -650,7 +656,11 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
                 disabled={isSavingCustomerClientId || !customerClientIdInput.trim()}
                 onClick={saveCustomerClientId}
               >
-                {isSavingCustomerClientId ? "Saving..." : "Save Customer Client ID"}
+                {isSavingCustomerClientId
+                  ? "Saving..."
+                  : customerApiHasClientId
+                    ? "Update Customer Client ID"
+                    : "Save Customer Client ID"}
               </button>
             </>
           ) : null}
