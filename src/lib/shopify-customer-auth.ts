@@ -8,6 +8,7 @@ import {
 
 const SHOPIFY_ADMIN_API_VERSION = "2024-10";
 const CUSTOMER_AUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const CUSTOMER_ACCOUNT_DEFAULT_SCOPES = ["openid", "email", "customer-account-api:full"];
 
 interface ShopifyShopResponse {
   shop?: {
@@ -69,12 +70,28 @@ function getAppBaseUrl(fallbackOrigin: string): string {
 }
 
 export function getCustomerApiScopes(): string[] {
-  const raw = process.env.SHOPIFY_CUSTOMER_ACCOUNT_SCOPES?.trim() || "openid,email,profile";
+  const raw = process.env.SHOPIFY_CUSTOMER_ACCOUNT_SCOPES?.trim() || CUSTOMER_ACCOUNT_DEFAULT_SCOPES.join(",");
 
-  return raw
+  return normalizeCustomerApiScopes(
+    raw
     .split(/[\s,]+/)
     .map((scope) => scope.trim())
-    .filter((scope) => scope.length > 0);
+    .filter((scope) => scope.length > 0)
+  );
+}
+
+export function normalizeCustomerApiScopes(scopes: string[] | undefined): string[] {
+  const next = new Set((scopes ?? []).map((scope) => scope.trim()).filter((scope) => scope.length > 0));
+
+  if (next.has("profile")) {
+    next.delete("profile");
+  }
+
+  for (const requiredScope of CUSTOMER_ACCOUNT_DEFAULT_SCOPES) {
+    next.add(requiredScope);
+  }
+
+  return [...next];
 }
 
 export function getCustomerAuthCallbackUrl(fallbackOrigin: string): string {
@@ -227,9 +244,9 @@ export async function detectCustomerAuthState(params: {
   const hostedType = await probeHostedAccountType(params.shopDomain, accountsEnabled);
   const openIdConfig = await discoverOpenIdConfiguration(params.shopDomain);
   const clientId = current?.customerAccountApi.clientId?.trim() || undefined;
-  const scopes = current?.customerAccountApi.scopes?.length
+  const scopes = normalizeCustomerApiScopes(current?.customerAccountApi.scopes?.length
     ? current.customerAccountApi.scopes
-    : getCustomerApiScopes();
+    : getCustomerApiScopes());
   const customerApiEnabled = Boolean(
     accountsEnabled && openIdConfig?.authorization_endpoint && openIdConfig?.token_endpoint && clientId
   );

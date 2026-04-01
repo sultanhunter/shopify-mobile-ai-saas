@@ -6,6 +6,7 @@ import {
   createCustomerAuthState,
   createPkcePair,
   getCustomerAuthCallbackUrl,
+  normalizeCustomerApiScopes,
 } from "@/lib/shopify-customer-auth";
 
 export const runtime = "nodejs";
@@ -33,6 +34,7 @@ export async function POST(request: Request, { params }: Params) {
     const clientId = auth.customerAccountApi.clientId;
     const authorizationEndpoint = auth.customerAccountApi.authorizationEndpoint;
     const callbackUrl = getCustomerAuthCallbackUrl(new URL(request.url).origin);
+    const normalizedScopes = normalizeCustomerApiScopes(auth.customerAccountApi.scopes);
     if (!auth.customerAccountApi.enabled || !clientId || !authorizationEndpoint || !callbackUrl) {
       return NextResponse.json(
         {
@@ -66,7 +68,7 @@ export async function POST(request: Request, { params }: Params) {
       authorizationEndpoint,
       clientId,
       redirectUri: callbackUrl,
-      scopes: auth.customerAccountApi.scopes,
+      scopes: normalizedScopes,
       state,
       codeChallenge: pkce.codeChallenge,
     });
@@ -92,6 +94,10 @@ export async function POST(request: Request, { params }: Params) {
               customerAuth: current.store.customerAuth
                 ? {
                     ...current.store.customerAuth,
+                    customerAccountApi: {
+                      ...current.store.customerAuth.customerAccountApi,
+                      scopes: normalizedScopes,
+                    },
                     sessions,
                   }
                 : current.store.customerAuth,
