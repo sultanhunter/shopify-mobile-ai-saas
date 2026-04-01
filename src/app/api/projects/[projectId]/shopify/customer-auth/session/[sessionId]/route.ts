@@ -90,6 +90,47 @@ export async function GET(_: Request, { params }: Params) {
       return NextResponse.json({ status: "expired", error: "Customer auth session expired." });
     }
 
+    if (session.status === "pending" && session.tokenPayloadEncrypted) {
+      const tokens = readTokenPayload(session.tokenPayloadEncrypted);
+      if (!tokens) {
+        return NextResponse.json({ status: "failed", error: "Session token payload is invalid." });
+      }
+
+      await updateProject(project.id, (current) => {
+        const now = new Date().toISOString();
+        const nextSessions = (current.store?.customerAuth?.sessions ?? []).map((entry) =>
+          entry.id === session.id
+            ? {
+                ...entry,
+                status: "consumed" as const,
+                updatedAt: now,
+                tokenPayloadEncrypted: undefined,
+                codeVerifier: undefined,
+                error: undefined,
+              }
+            : entry
+        );
+
+        return {
+          ...current,
+          updatedAt: now,
+          store: current.store
+            ? {
+                ...current.store,
+                customerAuth: current.store.customerAuth
+                  ? {
+                      ...current.store.customerAuth,
+                      sessions: nextSessions,
+                    }
+                  : current.store.customerAuth,
+              }
+            : current.store,
+        };
+      });
+
+      return NextResponse.json({ status: "completed", tokens });
+    }
+
     if (session.status === "completed") {
       const tokens = readTokenPayload(session.tokenPayloadEncrypted);
       if (!tokens) {

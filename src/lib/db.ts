@@ -127,6 +127,32 @@ function mergeCustomerAuthSessions(
 ): unknown {
   const combined = new Map<string, Record<string, unknown>>();
 
+  const statusRank = (status: unknown): number => {
+    switch (status) {
+      case "consumed":
+        return 5;
+      case "completed":
+        return 4;
+      case "failed":
+        return 3;
+      case "expired":
+        return 2;
+      case "pending":
+        return 1;
+      default:
+        return 0;
+    }
+  };
+
+  const toTime = (value: unknown): number => {
+    if (typeof value !== "string") {
+      return Number.NEGATIVE_INFINITY;
+    }
+
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+  };
+
   const addSessions = (value: unknown) => {
     if (!Array.isArray(value)) {
       return;
@@ -143,11 +169,29 @@ function mergeCustomerAuthSessions(
         continue;
       }
 
-      const previous = combined.get(id) ?? {};
-      combined.set(id, {
-        ...previous,
-        ...record,
-      });
+      const previous = combined.get(id);
+      if (!previous) {
+        combined.set(id, { ...record });
+        continue;
+      }
+
+      const previousRank = statusRank(previous.status);
+      const nextRank = statusRank(record.status);
+
+      if (nextRank > previousRank) {
+        combined.set(id, { ...record });
+        continue;
+      }
+
+      if (nextRank < previousRank) {
+        continue;
+      }
+
+      const previousUpdatedAt = toTime(previous.updatedAt);
+      const nextUpdatedAt = toTime(record.updatedAt);
+      if (nextUpdatedAt >= previousUpdatedAt) {
+        combined.set(id, { ...record });
+      }
     }
   };
 
