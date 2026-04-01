@@ -1348,6 +1348,8 @@ interface SessionStatusPayload {
   status?: "pending" | "completed" | "failed" | "expired" | "consumed";
   tokens?: AuthSession["tokens"];
   error?: string;
+  requestedSessionId?: string;
+  knownSessionIds?: string[];
 }
 
 export function createCustomerApiAuthStrategy(context: AuthStrategyContext): AuthStrategy {
@@ -1387,7 +1389,13 @@ export function createCustomerApiAuthStrategy(context: AuthStrategyContext): Aut
       const payload = (await response.json().catch(() => null)) as SessionStatusPayload | null;
       if (!response.ok || !payload?.status) {
         context.setStatus("error");
-        context.setError(payload?.error ?? "Failed to check auth status");
+        const sessionDebug = payload?.knownSessionIds?.length
+          ? " Known session IDs: " + payload.knownSessionIds.join(", ")
+          : "";
+        const requestedDebug = payload?.requestedSessionId
+          ? " Requested: " + payload.requestedSessionId + "."
+          : "";
+        context.setError((payload?.error ?? "Failed to check auth status") + requestedDebug + sessionDebug);
         return false;
       }
 

@@ -5,6 +5,8 @@ import { decryptSecret } from "@/lib/secret-crypto";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 interface Params {
   params: {
@@ -38,7 +40,19 @@ export async function GET(_: Request, { params }: Params) {
     const sessions = auth?.sessions ?? [];
     const session = sessions.find((entry) => entry.id === params.sessionId);
     if (!session) {
-      return NextResponse.json({ error: "Customer auth session not found." }, { status: 404 });
+      return NextResponse.json(
+        {
+          error: "Customer auth session not found.",
+          requestedSessionId: params.sessionId,
+          knownSessionIds: sessions.map((entry) => entry.id).slice(-10),
+        },
+        {
+          status: 404,
+          headers: {
+            "Cache-Control": "no-store, max-age=0",
+          },
+        }
+      );
     }
 
     const expiresAtMs = Date.parse(session.expiresAt);
