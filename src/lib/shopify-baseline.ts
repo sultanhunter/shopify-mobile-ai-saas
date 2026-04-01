@@ -324,7 +324,10 @@ export default function AccountScreen() {
     signIn,
     completeSignIn,
     signOut,
-    isLoading
+    isLoading,
+    pendingSessionId,
+    lastPolledSessionId,
+    lastCompletedSessionId
   } = useAuth();
 
   return (
@@ -384,6 +387,13 @@ export default function AccountScreen() {
           <Text style={styles.cardText}>Hosted account type: {config.hosted.accountType}</Text>
           <Text style={styles.cardText}>Hosted enabled: {String(config.hosted.accountsEnabled)}</Text>
           <Text style={styles.cardText}>Customer API enabled: {String(config.customerAccountApi.enabled)}</Text>
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Auth debug</Text>
+          <Text style={styles.cardText}>Pending session ID: {pendingSessionId ?? "n/a"}</Text>
+          <Text style={styles.cardText}>Last polled session ID: {lastPolledSessionId ?? "n/a"}</Text>
+          <Text style={styles.cardText}>Last completed session ID: {lastCompletedSessionId ?? "n/a"}</Text>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -1280,6 +1290,9 @@ export interface AuthStrategyContext {
   setStatus: (status: AuthStatus) => void;
   setError: (message: string | null) => void;
   setSession: (session: AuthSession | undefined) => void;
+  setPendingSessionId: (sessionId: string | undefined) => void;
+  setLastPolledSessionId: (sessionId: string | undefined) => void;
+  setLastCompletedSessionId: (sessionId: string | undefined) => void;
 }
 
 export interface AuthStrategy {
@@ -1299,6 +1312,7 @@ export function createHostedAuthStrategy(context: AuthStrategyContext): AuthStra
     signIn: async () => {
       context.setStatus("signing_in");
       context.setError(null);
+      context.setPendingSessionId(undefined);
       await Linking.openURL(context.config.hosted.loginUrl);
       context.setStatus("signed_out");
     },
@@ -1306,6 +1320,7 @@ export function createHostedAuthStrategy(context: AuthStrategyContext): AuthStra
       return false;
     },
     signOut: async () => {
+      context.setPendingSessionId(undefined);
       context.setSession(undefined);
       context.setStatus("signed_out");
       context.setError(null);
@@ -1351,6 +1366,7 @@ export function createCustomerApiAuthStrategy(context: AuthStrategyContext): Aut
       }
 
       pendingSessionId = startPayload.sessionId;
+      context.setPendingSessionId(pendingSessionId);
       context.setStatus("awaiting_completion");
       await Linking.openURL(startPayload.authUrl);
     },
@@ -1358,6 +1374,8 @@ export function createCustomerApiAuthStrategy(context: AuthStrategyContext): Aut
       if (!pendingSessionId) {
         return false;
       }
+
+      context.setLastPolledSessionId(pendingSessionId);
 
       const response = await fetch(
         resolveAuthUrl(context.config.endpoints.sessionBase + "/" + encodeURIComponent(pendingSessionId)),
@@ -1386,7 +1404,9 @@ export function createCustomerApiAuthStrategy(context: AuthStrategyContext): Aut
         });
         context.setStatus("signed_in");
         context.setError(null);
+        context.setLastCompletedSessionId(pendingSessionId);
         pendingSessionId = undefined;
+        context.setPendingSessionId(undefined);
         return true;
       }
 
@@ -1394,11 +1414,13 @@ export function createCustomerApiAuthStrategy(context: AuthStrategyContext): Aut
       context.setError(payload.error ?? "Customer auth did not complete");
       if (payload.status !== "pending") {
         pendingSessionId = undefined;
+        context.setPendingSessionId(undefined);
       }
       return false;
     },
     signOut: async () => {
       pendingSessionId = undefined;
+      context.setPendingSessionId(undefined);
       context.setSession(undefined);
       context.setStatus("signed_out");
       context.setError(null);
@@ -1422,6 +1444,9 @@ interface AuthContextValue {
   config: CustomerAuthRemoteConfig;
   error: string | null;
   activeMethod: AuthMethod;
+  pendingSessionId?: string;
+  lastPolledSessionId?: string;
+  lastCompletedSessionId?: string;
   isLoading: boolean;
   setActiveMethod: (method: AuthMethod) => void;
   signIn: () => Promise<void>;
@@ -1459,6 +1484,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<AuthSession | undefined>();
   const [error, setError] = useState<string | null>(null);
   const [activeMethod, setActiveMethodState] = useState<AuthMethod>("shopify_hosted");
+  const [pendingSessionId, setPendingSessionId] = useState<string | undefined>();
+  const [lastPolledSessionId, setLastPolledSessionId] = useState<string | undefined>();
+  const [lastCompletedSessionId, setLastCompletedSessionId] = useState<string | undefined>();
 
   useEffect(() => {
     let cancelled = false;
@@ -1488,7 +1516,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       config,
       setStatus,
       setError,
-      setSession
+      setSession,
+      setPendingSessionId,
+      setLastPolledSessionId,
+      setLastCompletedSessionId
     }),
     [config]
   );
@@ -1511,6 +1542,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setStatus("signed_out");
       setSession(undefined);
       setError(null);
+      setPendingSessionId(undefined);
       void updateActiveAuthMethod(method).catch(() => {
         // local method remains selected even if backend persistence fails
       });
@@ -1565,13 +1597,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       config,
       error,
       activeMethod,
+      pendingSessionId,
+      lastPolledSessionId,
+      lastCompletedSessionId,
       isLoading: status === "loading_config" || status === "signing_in",
       setActiveMethod,
       signIn,
       completeSignIn,
       signOut
     }),
-    [status, session, config, error, activeMethod, setActiveMethod, signIn, completeSignIn, signOut]
+    [
+      status,
+      session,
+      config,
+      error,
+      activeMethod,
+      pendingSessionId,
+      lastPolledSessionId,
+      lastCompletedSessionId,
+      setActiveMethod,
+      signIn,
+      completeSignIn,
+      signOut
+    ]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
