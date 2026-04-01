@@ -88,6 +88,9 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const [codeError, setCodeError] = useState<string | null>(null);
   const [codeContent, setCodeContent] = useState("");
   const [isBinaryCode, setIsBinaryCode] = useState(false);
+  const [customerClientIdInput, setCustomerClientIdInput] = useState("");
+  const [isSavingCustomerClientId, setIsSavingCustomerClientId] = useState(false);
+  const [customerClientIdFeedback, setCustomerClientIdFeedback] = useState<string | null>(null);
 
   const oauthStatus = searchParams.get("shopify_oauth");
   const oauthShop = searchParams.get("shop");
@@ -129,6 +132,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   }, [devSession?.expoUrl, devSession?.status]);
 
   const branchName = project.github.defaultBranch ?? "main";
+  const customerApiNeedsClientId = Boolean(customerAuth && !customerAuth.customerAccountApi.hasClientId);
   const mobileCodeRoot = useMemo(
     () => normalizeWorkspaceDir(project.workspaceLayout?.mobileAppDir, "mobile"),
     [project.workspaceLayout?.mobileAppDir]
@@ -160,6 +164,16 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
   const visibleCodeFiles = codeViewerScope === "expo" ? expoCodeFiles : backendCodeFiles;
 
+  const refreshProject = useCallback(async () => {
+    const response = await fetch(`/api/projects/${project.id}`, { cache: "no-store" });
+    const payload = (await response.json().catch(() => null)) as { project?: PublicProject; error?: string } | null;
+    if (!response.ok || !payload?.project) {
+      throw new Error(payload?.error ?? "Failed to refresh project.");
+    }
+
+    setProject(payload.project);
+  }, [project.id]);
+
   const refreshRepoFiles = useCallback(async () => {
     try {
       const response = await fetch(`/api/projects/${project.id}/files`, { cache: "no-store" });
@@ -177,6 +191,10 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   useEffect(() => {
     void refreshRepoFiles();
   }, [refreshRepoFiles]);
+
+  useEffect(() => {
+    setCustomerClientIdFeedback(null);
+  }, [project.id]);
 
   useEffect(() => {
     if (!showCodeViewer) {
@@ -279,6 +297,41 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to start Shopify OAuth.");
       setIsConnectingStore(false);
+    }
+  }
+
+  async function saveCustomerClientId() {
+    const trimmedClientId = customerClientIdInput.trim();
+    if (!trimmedClientId || isSavingCustomerClientId) {
+      return;
+    }
+
+    setIsSavingCustomerClientId(true);
+    setCustomerClientIdFeedback(null);
+
+    try {
+      const response = await fetch(`/api/projects/${project.id}/shopify/customer-auth/config`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          customerAccountClientId: trimmedClientId
+        })
+      });
+
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Failed to save Customer Account client ID.");
+      }
+
+      await refreshProject();
+      setCustomerClientIdInput("");
+      setCustomerClientIdFeedback("Customer Account client ID saved for this store.");
+    } catch (caught) {
+      setCustomerClientIdFeedback(caught instanceof Error ? caught.message : "Failed to save Customer Account client ID.");
+    } finally {
+      setIsSavingCustomerClientId(false);
     }
   }
 
@@ -580,6 +633,28 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
               Customer API: {customerAuth.customerAccountApi.enabled ? "available" : "unavailable"}.
             </p>
           ) : null}
+          {customerApiNeedsClientId ? (
+            <>
+              <p className="meta-line">
+                Customer Account API client ID is required for this store. Paste it once to enable customer OAuth.
+              </p>
+              <input
+                className="text-input"
+                placeholder="Customer Account API client ID"
+                value={customerClientIdInput}
+                onChange={(event) => setCustomerClientIdInput(event.target.value)}
+              />
+              <button
+                className="button"
+                type="button"
+                disabled={isSavingCustomerClientId || !customerClientIdInput.trim()}
+                onClick={saveCustomerClientId}
+              >
+                {isSavingCustomerClientId ? "Saving..." : "Save Customer Client ID"}
+              </button>
+            </>
+          ) : null}
+          {customerClientIdFeedback ? <p className="meta-line">{customerClientIdFeedback}</p> : null}
         </div>
 
         <div className="chat-main">

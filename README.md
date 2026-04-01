@@ -78,7 +78,7 @@ cp .env.example .env.local
 - Set `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET`
 - Set `SHOPIFY_OAUTH_STATE_SECRET` and `SHOPIFY_TOKEN_ENCRYPTION_SECRET`
 - Optional Customer Account API vars for mobile customer login:
-  - `SHOPIFY_CUSTOMER_ACCOUNT_CLIENT_ID` (falls back to `SHOPIFY_API_KEY`)
+  - Customer Account client ID is stored per project/store in DB (set via workspace UI/API)
   - `SHOPIFY_CUSTOMER_ACCOUNT_SCOPES` (default `openid,email,profile`)
 - `SHOPIFY_CUSTOMER_AUTH_CALLBACK_URL` (defaults to `<NEXTJS_APP_BASE_URL>/api/shopify/customer-auth/callback`)
 - Set `GEMINI_API_KEY`

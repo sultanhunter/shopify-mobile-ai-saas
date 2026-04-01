@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getProject, updateProject } from "@/lib/db";
-import { detectCustomerAuthState } from "@/lib/shopify-customer-auth";
+import { detectCustomerAuthState, getCustomerApiScopes } from "@/lib/shopify-customer-auth";
 import { decryptSecret } from "@/lib/secret-crypto";
 
 export const runtime = "nodejs";
@@ -109,18 +109,74 @@ export async function POST(request: NextRequest, { params }: Params) {
   try {
     const payload = (await request.json()) as {
       activeMethod?: "shopify_hosted" | "customer_account_api";
+      customerAccountClientId?: string | null;
     };
 
-    if (!payload.activeMethod) {
-      return NextResponse.json({ error: "activeMethod is required." }, { status: 400 });
+    const hasMethodUpdate = Boolean(payload.activeMethod);
+    const hasClientIdUpdate = Object.prototype.hasOwnProperty.call(payload, "customerAccountClientId");
+    if (!hasMethodUpdate && !hasClientIdUpdate) {
+      return NextResponse.json({ error: "Provide activeMethod and/or customerAccountClientId." }, { status: 400 });
     }
 
     const project = await getProject(params.projectId);
-    if (!project?.store?.customerAuth) {
-      return NextResponse.json({ error: "Customer auth is not configured for this project." }, { status: 404 });
+    if (!project?.store) {
+      return NextResponse.json({ error: "Shopify store is not connected for this project." }, { status: 404 });
     }
 
-    if (!project.store.customerAuth.supportedMethods.includes(payload.activeMethod)) {
+    const shopDomain = project.store.shopDomain?.trim().toLowerCase();
+    if (!shopDomain) {
+      return NextResponse.json({ error: "Shopify store domain is missing on this project." }, { status: 409 });
+    }
+
+    const accessTokenEncrypted = project.store.accessTokenEncrypted;
+    const accessToken = accessTokenEncrypted ? decryptSecret(accessTokenEncrypted) : project.store.accessToken;
+
+    const normalizedClientId = hasClientIdUpdate
+      ? typeof payload.customerAccountClientId === "string"
+        ? payload.customerAccountClientId.trim()
+        : ""
+      : undefined;
+
+    if (hasClientIdUpdate && !normalizedClientId) {
+      return NextResponse.json({ error: "customerAccountClientId cannot be empty." }, { status: 400 });
+    }
+
+    const currentAuthState = project.store.customerAuth
+      ? {
+          ...project.store.customerAuth,
+          customerAccountApi: {
+            ...project.store.customerAuth.customerAccountApi,
+            clientId: hasClientIdUpdate ? normalizedClientId : project.store.customerAuth.customerAccountApi.clientId,
+          },
+        }
+      : hasClientIdUpdate
+        ? {
+            detectedAt: new Date().toISOString(),
+            activeMethod: "shopify_hosted" as const,
+            recommendedMethod: "shopify_hosted" as const,
+            supportedMethods: ["shopify_hosted" as const],
+            hosted: {
+              accountsEnabled: true,
+              accountType: "unknown" as const,
+              loginUrl: `https://${shopDomain}/account/login`,
+              accountUrl: `https://${shopDomain}/account`,
+            },
+            customerAccountApi: {
+              enabled: false,
+              clientId: normalizedClientId,
+              scopes: getCustomerApiScopes(),
+            },
+          }
+        : undefined;
+
+    const detected = await detectCustomerAuthState({
+      shopDomain,
+      accessToken,
+      fallbackOrigin: request.nextUrl.origin,
+      current: currentAuthState,
+    });
+
+    if (payload.activeMethod && !detected.supportedMethods.includes(payload.activeMethod)) {
       return NextResponse.json(
         {
           error: `Method ${payload.activeMethod} is not supported for this store.`,
@@ -131,18 +187,18 @@ export async function POST(request: NextRequest, { params }: Params) {
 
     const updated = await updateProject(project.id, (current) => {
       const now = new Date().toISOString();
+      const nextCustomerAuth = {
+        ...detected,
+        activeMethod: payload.activeMethod ?? detected.activeMethod,
+      };
+
       return {
         ...current,
         updatedAt: now,
         store: current.store
           ? {
               ...current.store,
-              customerAuth: current.store.customerAuth
-                ? {
-                    ...current.store.customerAuth,
-                    activeMethod: payload.activeMethod!,
-                  }
-                : current.store.customerAuth,
+              customerAuth: nextCustomerAuth,
             }
           : current.store,
       };
@@ -151,6 +207,10 @@ export async function POST(request: NextRequest, { params }: Params) {
     return NextResponse.json({
       auth: {
         activeMethod: updated?.store?.customerAuth?.activeMethod ?? payload.activeMethod,
+        customerAccountApi: {
+          hasClientId: Boolean(updated?.store?.customerAuth?.customerAccountApi.clientId),
+          enabled: Boolean(updated?.store?.customerAuth?.customerAccountApi.enabled),
+        },
       },
     });
   } catch (caught) {

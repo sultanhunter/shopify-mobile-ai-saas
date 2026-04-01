@@ -68,13 +68,6 @@ function getAppBaseUrl(fallbackOrigin: string): string {
   return process.env.NEXTJS_APP_BASE_URL?.trim() || process.env.APP_BASE_URL?.trim() || fallbackOrigin;
 }
 
-function getCustomerApiClientId(): string | undefined {
-  const clientId =
-    process.env.SHOPIFY_CUSTOMER_ACCOUNT_CLIENT_ID?.trim() || process.env.SHOPIFY_API_KEY?.trim() || undefined;
-
-  return clientId || undefined;
-}
-
 export function getCustomerApiScopes(): string[] {
   const raw = process.env.SHOPIFY_CUSTOMER_ACCOUNT_SCOPES?.trim() || "openid,email,profile";
 
@@ -233,8 +226,10 @@ export async function detectCustomerAuthState(params: {
 
   const hostedType = await probeHostedAccountType(params.shopDomain, accountsEnabled);
   const openIdConfig = await discoverOpenIdConfiguration(params.shopDomain);
-  const clientId = getCustomerApiClientId() || current?.customerAccountApi.clientId;
-  const scopes = getCustomerApiScopes();
+  const clientId = current?.customerAccountApi.clientId?.trim() || undefined;
+  const scopes = current?.customerAccountApi.scopes?.length
+    ? current.customerAccountApi.scopes
+    : getCustomerApiScopes();
   const customerApiEnabled = Boolean(
     accountsEnabled && openIdConfig?.authorization_endpoint && openIdConfig?.token_endpoint && clientId
   );
