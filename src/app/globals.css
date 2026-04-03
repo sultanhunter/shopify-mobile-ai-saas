@@ -1433,3 +1433,306 @@ html[data-theme="dark"] .block-chip {
     display: none;
   }
 }
+
+/* Workspace V3 */
+.workspace-v3 {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 360px minmax(0, 1fr);
+  background:
+    radial-gradient(980px 620px at 100% 100%, rgba(24, 48, 84, 0.55), transparent 62%),
+    radial-gradient(920px 640px at 0% 100%, rgba(9, 62, 44, 0.36), transparent 64%),
+    #090f16;
+  color: #e8eef6;
+}
+
+.workspace-v3-left {
+  border-right: 1px solid rgba(77, 96, 120, 0.44);
+  background: linear-gradient(180deg, rgba(8, 13, 20, 0.96), rgba(7, 14, 20, 0.98));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.workspace-v3-head {
+  padding: 16px;
+  border-bottom: 1px solid rgba(77, 96, 120, 0.4);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.workspace-v3-head .workspace-brandline {
+  margin: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #7daeff;
+}
+
+.workspace-v3-head .workspace-title {
+  margin: 7px 0 0;
+  font-size: 21px;
+  line-height: 1.2;
+  color: #f1f6ff;
+}
+
+.workspace-v3-head .back-link {
+  color: #b6cff3;
+  border: 1px solid rgba(96, 118, 147, 0.66);
+  border-radius: 10px;
+  text-decoration: none;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.workspace-v3-composer {
+  padding: 14px;
+  display: grid;
+  align-content: end;
+  gap: 10px;
+}
+
+.workspace-v3-composer .text-area,
+.workspace-v3-composer .text-input {
+  border-color: rgba(90, 114, 145, 0.72);
+  background: rgba(9, 17, 29, 0.92);
+  color: #ecf2fb;
+}
+
+.workspace-v3-composer .text-input:focus,
+.workspace-v3-composer .text-area:focus {
+  border-color: #67abff;
+  box-shadow: 0 0 0 3px rgba(96, 162, 242, 0.26);
+}
+
+.workspace-v3-composer-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+}
+
+.workspace-v3-right {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.workspace-v3-topbar {
+  height: 56px;
+  border-bottom: 1px solid rgba(77, 96, 120, 0.4);
+  background: rgba(7, 11, 17, 0.9);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 14px;
+}
+
+.workspace-v3-main {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 114px minmax(0, 1fr);
+}
+
+.workspace-v3-tabs {
+  border-right: 1px solid rgba(77, 96, 120, 0.4);
+  padding: 12px 10px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  background: rgba(10, 16, 25, 0.76);
+}
+
+.workspace-v3-panel {
+  min-height: 0;
+  padding: 10px;
+  border-left: 1px solid rgba(77, 96, 120, 0.08);
+}
+
+.workspace-v3-preview-only {
+  min-height: calc(100vh - 100px);
+  border: 1px solid rgba(77, 96, 120, 0.45);
+  border-radius: 16px;
+  background: rgba(15, 21, 31, 0.62);
+  display: grid;
+  place-items: center;
+}
+
+.workspace-v3-log {
+  min-height: 420px;
+  max-height: 65vh;
+}
+
+.workspace-v3-db-wrap {
+  display: grid;
+  gap: 12px;
+}
+
+.workspace-v3-store-card {
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-v3-db-studio {
+  min-height: calc(100vh - 250px);
+  border: 1px solid rgba(77, 96, 120, 0.42);
+  border-radius: 14px;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  background: rgba(10, 17, 27, 0.74);
+}
+
+.workspace-v3-db-sidebar {
+  border-right: 1px solid rgba(77, 96, 120, 0.42);
+  padding: 10px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.workspace-v3-db-sidebar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspace-v3-db-table {
+  border: 1px solid rgba(86, 108, 136, 0.56);
+  border-radius: 10px;
+  background: rgba(12, 22, 34, 0.84);
+  color: #cddcf0;
+  padding: 8px 9px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-v3-db-table-active {
+  border-color: #7db4ff;
+  background: rgba(29, 59, 97, 0.62);
+  color: #f0f6ff;
+}
+
+.workspace-v3-db-main {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.workspace-v3-db-main-head {
+  border-bottom: 1px solid rgba(77, 96, 120, 0.42);
+  padding: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.workspace-v3-db-main-head h3 {
+  margin: 6px 0 0;
+  font-size: 18px;
+  color: #eef4ff;
+}
+
+.workspace-v3-db-grid-wrap {
+  min-height: 0;
+  overflow: auto;
+}
+
+.workspace-v3-db-grid {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.workspace-v3-db-grid th,
+.workspace-v3-db-grid td {
+  border-bottom: 1px solid rgba(77, 96, 120, 0.36);
+  border-right: 1px solid rgba(77, 96, 120, 0.25);
+  text-align: left;
+  vertical-align: top;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  color: #cfe0f7;
+  white-space: pre-wrap;
+}
+
+.workspace-v3-db-grid th {
+  position: sticky;
+  top: 0;
+  background: rgba(14, 24, 36, 0.96);
+  z-index: 1;
+}
+
+.workspace-v3-db-grid th small {
+  display: block;
+  margin-top: 4px;
+  color: #8ba4c3;
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.workspace-v3-db-empty {
+  text-align: center;
+  color: #8ea5c2;
+  padding: 20px;
+}
+
+@media (max-width: 1100px) {
+  .workspace-v3 {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-v3-left {
+    border-right: 0;
+    border-bottom: 1px solid rgba(77, 96, 120, 0.44);
+  }
+}
+
+@media (max-width: 920px) {
+  .workspace-v3-main {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-v3-tabs {
+    border-right: 0;
+    border-bottom: 1px solid rgba(77, 96, 120, 0.4);
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .tool-tab {
+    justify-items: center;
+    text-align: center;
+  }
+
+  .workspace-v3-db-studio {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-v3-db-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid rgba(77, 96, 120, 0.42);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+
+  .workspace-v3-db-sidebar-head {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 700px) {
+  .workspace-v3-composer-row {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-v3-topbar {
+    padding-inline: 10px;
+  }
+
+  .workspace-v3-topbar .meta-line:first-child {
+    display: none;
+  }
+}

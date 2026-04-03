@@ -4,66 +4,50 @@ import Image from "next/image";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { MobilePreview } from "@/components/workspace/mobile-preview";
-import { ChatMessage, DevSessionState, PublicProject } from "@/lib/models";
+import { DevSessionState, PublicProject } from "@/lib/models";
 
 interface WorkspaceClientProps {
   initialProject: PublicProject;
 }
 
 type ThinkingMode = "low" | "medium" | "high" | "xHigh";
-type CodeViewerScope = "expo" | "backend";
-type RightWorkspaceTab = "preview" | "code" | "runtime" | "store" | "logs";
+type WorkspaceTab = "preview" | "mobile" | "backend" | "database";
+
+interface DatabaseColumn {
+  name: string;
+  type: string;
+}
+
+interface DatabaseResponse {
+  database?: {
+    provider?: string;
+    databaseName?: string;
+  };
+  tables?: string[];
+  selectedTable?: string | null;
+  columns?: DatabaseColumn[];
+  rows?: Array<Record<string, unknown>>;
+  rowCount?: number;
+  error?: string;
+}
 
 const LLM_MODEL_OPTIONS = ["gpt-5.4"];
 const THINKING_MODE_OPTIONS: ThinkingMode[] = ["low", "medium", "high", "xHigh"];
 
-const OPERATIONAL_MESSAGE_PREFIXES = [
-  "Project initialized.",
-  "Ready. Prompt me",
-  "Dev session started (",
-  "Dev session stopped",
-  "Dev session no longer exists on runner.",
-  "Dev session was already gone on runner",
-  "Dev session not found on runner during commit.",
-  "Store setup:",
-  "Store setup failed:",
-  "Store connected:",
-  "Expo scaffold warnings:"
-];
-
-function isOperationalMessage(message: ChatMessage): boolean {
-  if (message.role === "system") {
-    return true;
+function renderCellValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "null";
   }
 
-  return OPERATIONAL_MESSAGE_PREFIXES.some((prefix) => message.content.startsWith(prefix));
-}
-
-function formatLogLine(message: ChatMessage): string {
-  const time = new Date(message.createdAt).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit"
-  });
-
-  return `[${time}] ${message.content}`;
-}
-
-function normalizeWorkspaceDir(value: string | undefined, fallback: string): string {
-  const trimmed = value?.trim();
-  if (!trimmed || trimmed === "." || trimmed === "./") {
-    return ".";
+  if (typeof value === "string") {
+    return value;
   }
 
-  return trimmed.replace(/^\.\//, "").replace(/\/$/, "") || fallback;
-}
-
-function isFileInsideDir(filePath: string, dir: string): boolean {
-  if (dir === ".") {
-    return true;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
   }
 
-  return filePath === dir || filePath.startsWith(`${dir}/`);
+  return JSON.stringify(value);
 }
 
 export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
@@ -73,8 +57,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const [storeDomain, setStoreDomain] = useState(initialProject.store?.shopDomain ?? "");
   const [selectedModel, setSelectedModel] = useState(LLM_MODEL_OPTIONS[0]);
   const [selectedThinking, setSelectedThinking] = useState<ThinkingMode>("medium");
-  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<RightWorkspaceTab>("preview");
-  const [codeViewerScope, setCodeViewerScope] = useState<CodeViewerScope>("expo");
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("preview");
   const [isSendingPrompt, setIsSendingPrompt] = useState(false);
   const [isConnectingStore, setIsConnectingStore] = useState(false);
   const [isStartingDevSession, setIsStartingDevSession] = useState(false);
@@ -84,17 +67,18 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const [error, setError] = useState<string | null>(null);
   const [devSessionFeedback, setDevSessionFeedback] = useState<string | null>(null);
   const [devSessionError, setDevSessionError] = useState<string | null>(null);
-  const [streamedResponse, setStreamedResponse] = useState("");
-  const [streamEvents, setStreamEvents] = useState<string[]>([]);
-  const [repoFiles, setRepoFiles] = useState<string[]>(initialProject.fileIndex ?? []);
-  const [selectedCodeFile, setSelectedCodeFile] = useState("");
-  const [isLoadingCode, setIsLoadingCode] = useState(false);
-  const [codeError, setCodeError] = useState<string | null>(null);
-  const [codeContent, setCodeContent] = useState("");
-  const [isBinaryCode, setIsBinaryCode] = useState(false);
   const [customerClientIdInput, setCustomerClientIdInput] = useState("");
   const [isSavingCustomerClientId, setIsSavingCustomerClientId] = useState(false);
   const [customerClientIdFeedback, setCustomerClientIdFeedback] = useState<string | null>(null);
+
+  const [dbLoading, setDbLoading] = useState(false);
+  const [dbError, setDbError] = useState<string | null>(null);
+  const [dbTables, setDbTables] = useState<string[]>([]);
+  const [dbSelectedTable, setDbSelectedTable] = useState<string | null>(null);
+  const [dbColumns, setDbColumns] = useState<DatabaseColumn[]>([]);
+  const [dbRows, setDbRows] = useState<Array<Record<string, unknown>>>([]);
+  const [dbRowCount, setDbRowCount] = useState(0);
+  const [dbName, setDbName] = useState<string | undefined>(undefined);
 
   const oauthStatus = searchParams.get("shopify_oauth");
   const oauthShop = searchParams.get("shop");
@@ -104,81 +88,20 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const latestRun = project.runs[0];
   const devSession = project.devSession;
   const customerAuth = project.store?.customerAuth;
+  const customerApiHasClientId = Boolean(customerAuth?.customerAccountApi.hasClientId);
   const hasActiveDevSession = Boolean(devSession && (devSession.status === "starting" || devSession.status === "ready"));
 
-  const visibleMessages = useMemo(
-    () => project.messages.filter((message) => !isOperationalMessage(message)).slice(-24),
-    [project.messages]
-  );
-
-  const projectActivityLogs = useMemo(
-    () => project.messages.filter(isOperationalMessage).map(formatLogLine).slice(-80),
-    [project.messages]
-  );
-
-  const liveStreamLines = useMemo(() => {
-    const lines: string[] = [];
-
-    if (streamedResponse.trim()) {
-      lines.push(`[assistant] ${streamedResponse.trim()}`);
-    }
-
-    for (const entry of streamEvents) {
-      lines.push(`[event] ${entry}`);
-    }
-
-    return lines;
-  }, [streamEvents, streamedResponse]);
+  const expoBackendLogs = devSession?.expoBackendLogs ?? devSession?.backendLogs;
+  const expoBackendStatus = devSession?.expoBackendStatus ?? devSession?.backendStatus;
+  const expoBackendUrl = devSession?.expoBackendUrl ?? devSession?.backendUrl;
 
   const expoQrUrl = useMemo(() => {
     if (!devSession?.expoUrl || devSession.status !== "ready") {
       return null;
     }
 
-    return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(devSession.expoUrl)}`;
+    return `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(devSession.expoUrl)}`;
   }, [devSession?.expoUrl, devSession?.status]);
-
-  const branchName = project.github.defaultBranch ?? "main";
-  const customerApiHasClientId = Boolean(customerAuth?.customerAccountApi.hasClientId);
-  const mobileCodeRoot = useMemo(
-    () => normalizeWorkspaceDir(project.workspaceLayout?.mobileAppDir, "mobile"),
-    [project.workspaceLayout?.mobileAppDir]
-  );
-  const backendCodeRoot = useMemo(
-    () => normalizeWorkspaceDir(project.workspaceLayout?.expoBackendDir ?? project.workspaceLayout?.backendDir, "expo-backend"),
-    [project.workspaceLayout?.expoBackendDir, project.workspaceLayout?.backendDir]
-  );
-
-  const expoCodeFiles = useMemo(() => {
-    if (mobileCodeRoot === ".") {
-      if (backendCodeRoot === ".") {
-        return repoFiles;
-      }
-
-      return repoFiles.filter((filePath) => !isFileInsideDir(filePath, backendCodeRoot));
-    }
-
-    return repoFiles.filter((filePath) => isFileInsideDir(filePath, mobileCodeRoot));
-  }, [backendCodeRoot, mobileCodeRoot, repoFiles]);
-
-  const backendCodeFiles = useMemo(() => {
-    if (backendCodeRoot === ".") {
-      return repoFiles;
-    }
-
-    return repoFiles.filter((filePath) => isFileInsideDir(filePath, backendCodeRoot));
-  }, [backendCodeRoot, repoFiles]);
-
-  const visibleCodeFiles = codeViewerScope === "expo" ? expoCodeFiles : backendCodeFiles;
-  const runtimeBackendUrl = devSession?.expoBackendUrl ?? devSession?.backendUrl;
-
-  const workspaceTabs: Array<{ id: RightWorkspaceTab; label: string; glyph: string }> = [
-    { id: "preview", label: "Preview", glyph: "PV" },
-    { id: "code", label: "Code", glyph: "CD" },
-    { id: "runtime", label: "Runtime", glyph: "RT" },
-    { id: "store", label: "Store", glyph: "ST" },
-    { id: "logs", label: "Logs", glyph: "LG" }
-  ];
 
   const refreshProject = useCallback(async () => {
     const response = await fetch(`/api/projects/${project.id}`, { cache: "no-store" });
@@ -190,99 +113,38 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
     setProject(payload.project);
   }, [project.id]);
 
-  const refreshRepoFiles = useCallback(async () => {
-    try {
-      const response = await fetch(`/api/projects/${project.id}/files`, { cache: "no-store" });
-      const payload = (await response.json().catch(() => null)) as { files?: string[]; error?: string } | null;
-      if (!response.ok || !Array.isArray(payload?.files)) {
-        return;
-      }
-
-      setRepoFiles(payload.files);
-    } catch {
-      // keep previous list
-    }
-  }, [project.id]);
-
-  useEffect(() => {
-    void refreshRepoFiles();
-  }, [refreshRepoFiles]);
-
-  useEffect(() => {
-    setCustomerClientIdFeedback(null);
-  }, [project.id]);
-
-  useEffect(() => {
-    if (activeWorkspaceTab !== "code") {
-      return;
-    }
-
-    if (visibleCodeFiles.length === 0) {
-      if (selectedCodeFile) {
-        setSelectedCodeFile("");
-      }
-      return;
-    }
-
-    if (!selectedCodeFile || !visibleCodeFiles.includes(selectedCodeFile)) {
-      setSelectedCodeFile(visibleCodeFiles[0]);
-    }
-  }, [activeWorkspaceTab, selectedCodeFile, visibleCodeFiles]);
-
-  useEffect(() => {
-    if (activeWorkspaceTab !== "code" || !selectedCodeFile) {
-      setCodeContent("");
-      setCodeError(null);
-      setIsBinaryCode(false);
-      return;
-    }
-
-    let cancelled = false;
-
-    void (async () => {
-      setIsLoadingCode(true);
-      setCodeError(null);
+  const refreshDatabaseExplorer = useCallback(
+    async (nextTable?: string | null) => {
+      setDbLoading(true);
+      setDbError(null);
 
       try {
-        const response = await fetch(`/api/projects/${project.id}/code?path=${encodeURIComponent(selectedCodeFile)}`, {
+        const tableParam = nextTable ?? dbSelectedTable;
+        const query = tableParam ? `?table=${encodeURIComponent(tableParam)}` : "";
+        const response = await fetch(`/api/projects/${project.id}/database${query}`, {
           cache: "no-store"
         });
 
-        const payload = (await response.json()) as {
-          content?: string;
-          isBinary?: boolean;
-          error?: string;
-        };
-
-        if (!response.ok) {
-          throw new Error(payload.error ?? "Failed to load file content.");
+        const payload = (await response.json().catch(() => null)) as DatabaseResponse | null;
+        if (!response.ok || !payload) {
+          throw new Error(payload?.error ?? "Failed to load database explorer.");
         }
 
-        if (cancelled) {
-          return;
-        }
-
-        setIsBinaryCode(Boolean(payload.isBinary));
-        setCodeContent(typeof payload.content === "string" ? payload.content : "");
+        setDbTables(payload.tables ?? []);
+        setDbSelectedTable(payload.selectedTable ?? null);
+        setDbColumns(payload.columns ?? []);
+        setDbRows(payload.rows ?? []);
+        setDbRowCount(payload.rowCount ?? 0);
+        setDbName(payload.database?.databaseName);
       } catch (caught) {
-        if (cancelled) {
-          return;
-        }
-
-        setCodeError(caught instanceof Error ? caught.message : "Failed to load file content.");
-        setCodeContent("");
-        setIsBinaryCode(false);
+        setDbError(caught instanceof Error ? caught.message : "Failed to load database explorer.");
+        setDbRows([]);
       } finally {
-        if (!cancelled) {
-          setIsLoadingCode(false);
-        }
+        setDbLoading(false);
       }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeWorkspaceTab, project.id, selectedCodeFile]);
+    },
+    [dbSelectedTable, project.id]
+  );
 
   const refreshDevSession = useCallback(
     async (withSpinner = true) => {
@@ -297,7 +159,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
       setDevSessionError(null);
 
       try {
-        const response = await fetch(`/api/projects/${project.id}/dev-session/status?logLines=200`, {
+        const response = await fetch(`/api/projects/${project.id}/dev-session/status?logLines=300`, {
           cache: "no-store"
         });
 
@@ -329,6 +191,14 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
     return () => clearInterval(timer);
   }, [devSession, refreshDevSession]);
+
+  useEffect(() => {
+    if (activeTab !== "database") {
+      return;
+    }
+
+    void refreshDatabaseExplorer();
+  }, [activeTab, refreshDatabaseExplorer]);
 
   async function connectStoreWithOAuth() {
     const normalizedDomain = storeDomain.trim();
@@ -399,8 +269,6 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
     setIsSendingPrompt(true);
     setError(null);
-    setStreamedResponse("");
-    setStreamEvents([]);
 
     try {
       const response = await fetch(`/api/projects/${project.id}/messages/stream`, {
@@ -441,25 +309,12 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
           const parsed = JSON.parse(line) as {
             type?: string;
-            event?: { kind?: string; text?: string };
             project?: PublicProject;
             error?: string;
           };
 
           if (parsed.type === "error") {
             throw new Error(parsed.error ?? "Prompt execution failed.");
-          }
-
-          if (parsed.type === "stream" && parsed.event) {
-            const eventPayload = parsed.event;
-            const eventText = typeof eventPayload.text === "string" ? eventPayload.text : undefined;
-
-            if (eventPayload.kind === "text" && eventText) {
-              setStreamedResponse(eventText);
-            } else if (eventText) {
-              setStreamEvents((current) => [...current.slice(-24), eventText]);
-            }
-            continue;
           }
 
           if (parsed.type === "final" && parsed.project) {
@@ -474,7 +329,6 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
       }
 
       setPrompt("");
-      void refreshRepoFiles();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to run prompt.");
     } finally {
@@ -510,8 +364,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
       }
 
       setProject(payload.project);
-      setDevSessionFeedback("Dev session started. Waiting for mobile and backend URLs...");
-      void refreshRepoFiles();
+      setDevSessionFeedback("Dev session started.");
     } catch (caught) {
       setDevSessionError(caught instanceof Error ? caught.message : "Failed to start dev session.");
     } finally {
@@ -539,7 +392,6 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
       setProject(payload.project);
       setDevSessionFeedback("Dev session stopped.");
-      void refreshRepoFiles();
     } catch (caught) {
       setDevSessionError(caught instanceof Error ? caught.message : "Failed to stop dev session.");
     } finally {
@@ -580,10 +432,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
       }
 
       setProject(payload.project);
-      setDevSessionFeedback(
-        payload.committed ? `Pushed ${payload.commitSha ? payload.commitSha.slice(0, 12) : "latest updates"}.` : "No file changes to commit."
-      );
-      void refreshRepoFiles();
+      setDevSessionFeedback(payload.committed ? `Pushed ${payload.commitSha ? payload.commitSha.slice(0, 12) : "latest updates"}.` : "No changes to commit.");
     } catch (caught) {
       setDevSessionError(caught instanceof Error ? caught.message : "Failed to commit changes from dev session.");
     } finally {
@@ -596,39 +445,21 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   }
 
   return (
-    <div className="workspace-v2">
-      <section className="workspace-chat-pane">
-        <div className="workspace-chat-head">
+    <div className="workspace-v3">
+      <section className="workspace-v3-left">
+        <div className="workspace-v3-head">
           <div>
             <p className="workspace-brandline">Shopify Mobile Studio</p>
             <h1 className="workspace-title">{project.name}</h1>
-            <p className="workspace-subtitle">AI prompt-first workspace. Tools and runtime tabs are on the right.</p>
           </div>
           <Link className="back-link" href="/">
             Back
           </Link>
         </div>
 
-        <div className="workspace-chat-history">
-          {visibleMessages.length > 0 ? (
-            visibleMessages.map((message) => (
-              <div className={`msg msg-${message.role}`} key={message.id}>
-                {message.content}
-              </div>
-            ))
-          ) : (
-            <p className="meta-line">No chat replies yet. Send a prompt to start building.</p>
-          )}
-
-          <div className={`run-meta live-stream-panel ${isSendingPrompt ? "streaming-active" : ""}`}>
-            <h3>Live AI Stream</h3>
-            <div className="log-console live-stream-console">{liveStreamLines.length > 0 ? liveStreamLines.join("\n\n") : "Awaiting streamed response..."}</div>
-          </div>
-        </div>
-
-        <form className="workspace-composer" onSubmit={submitPrompt}>
+        <form className="workspace-v3-composer" onSubmit={submitPrompt}>
           <textarea className="text-area" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Keep building" />
-          <div className="workspace-composer-row">
+          <div className="workspace-v3-composer-row">
             <select className="text-input" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}>
               {LLM_MODEL_OPTIONS.map((model) => (
                 <option key={model} value={model}>
@@ -651,165 +482,75 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
         </form>
       </section>
 
-      <section className="workspace-main-pane">
-        <header className="workspace-main-topbar">
-          <div className="workspace-topbar-left">
-            <span className="status-light" />
-            <p>Session: {devSession ? getDevSessionStatusLabel(devSession) : "idle"}</p>
-          </div>
-          <div className="workspace-topbar-right">
-            <p className="meta-line">Store: {project.store?.connectedAt ? "connected" : "not connected"}</p>
-            <p className="meta-line">Workspace {project.id.slice(0, 8)}</p>
-          </div>
+      <section className="workspace-v3-right">
+        <header className="workspace-v3-topbar">
+          <p className="meta-line">Workspace {project.id.slice(0, 8)}</p>
+          <p className="meta-line">Session: {devSession ? getDevSessionStatusLabel(devSession) : "idle"}</p>
         </header>
 
-        <div className="workspace-main-body">
-          <nav className="workspace-tool-rail">
-            {workspaceTabs.map((tab) => (
-              <button
-                className={`tool-tab ${activeWorkspaceTab === tab.id ? "tool-tab-active" : ""}`}
-                key={tab.id}
-                onClick={() => setActiveWorkspaceTab(tab.id)}
-                type="button"
-              >
-                <span className="tool-tab-glyph">{tab.glyph}</span>
-                <span>{tab.label}</span>
-              </button>
-            ))}
+        <div className="workspace-v3-main">
+          <nav className="workspace-v3-tabs">
+            <button className={`tool-tab ${activeTab === "preview" ? "tool-tab-active" : ""}`} onClick={() => setActiveTab("preview")} type="button">
+              <span className="tool-tab-glyph">PV</span>
+              <span>Preview</span>
+            </button>
+            <button className={`tool-tab ${activeTab === "mobile" ? "tool-tab-active" : ""}`} onClick={() => setActiveTab("mobile")} type="button">
+              <span className="tool-tab-glyph">MB</span>
+              <span>Expo Mobile</span>
+            </button>
+            <button className={`tool-tab ${activeTab === "backend" ? "tool-tab-active" : ""}`} onClick={() => setActiveTab("backend")} type="button">
+              <span className="tool-tab-glyph">BE</span>
+              <span>Expo Backend</span>
+            </button>
+            <button className={`tool-tab ${activeTab === "database" ? "tool-tab-active" : ""}`} onClick={() => setActiveTab("database")} type="button">
+              <span className="tool-tab-glyph">DB</span>
+              <span>Database</span>
+            </button>
           </nav>
 
-          <div className="workspace-tab-wrap">
-            <div className="workspace-tab-toolbar">
-              {activeWorkspaceTab === "preview" ? (
-                <>
-                  <div className="toolbar-pills">
-                    <span className="toolbar-pill toolbar-pill-active">iOS</span>
-                    <span className="toolbar-pill">Web</span>
-                    <span className="toolbar-pill">Simulator</span>
-                  </div>
-                  <button
-                    className="toolbar-button"
-                    disabled={!devSession?.expoUrl}
-                    onClick={() => {
-                      if (devSession?.expoUrl) {
-                        window.open(devSession.expoUrl, "_blank", "noopener,noreferrer");
-                      }
-                    }}
-                    type="button"
-                  >
-                    Open on mobile
+          <div className="workspace-v3-panel">
+            {activeTab === "preview" ? (
+              <div className="workspace-v3-preview-only">{expoQrUrl ? <Image alt="Expo Go QR code" className="expo-qr" height={260} src={expoQrUrl} width={260} /> : null}</div>
+            ) : null}
+
+            {activeTab === "mobile" ? (
+              <div className="run-meta">
+                <p className="meta-line">Running: {devSession ? (devSession.status === "ready" || devSession.status === "starting" ? "yes" : "no") : "no"}</p>
+                {devSessionFeedback ? <p className="meta-line">{devSessionFeedback}</p> : null}
+                {devSessionError ? <p className="error-text">{devSessionError}</p> : null}
+                <div className="inline-grid">
+                  <button className="button" disabled={isStartingDevSession || hasActiveDevSession} onClick={startDevSession} type="button">
+                    {isStartingDevSession ? "Starting..." : "Start Session"}
                   </button>
-                </>
-              ) : (
-                <>
-                  <h3 className="workspace-tab-title">{workspaceTabs.find((tab) => tab.id === activeWorkspaceTab)?.label}</h3>
-                  <p className="meta-line">Branch: {branchName}</p>
-                </>
-              )}
-            </div>
-
-            <div className="workspace-tab-content">
-              {activeWorkspaceTab === "preview" ? (
-                <div className="preview-workbench">
-                  <div className="preview-device-stage">
-                    <MobilePreview preview={project.preview} />
-                  </div>
-                  <aside className="preview-side-card">
-                    <p className="meta-line">Expo backend: {devSession?.expoBackendStatus ?? devSession?.backendStatus ?? "not running"}</p>
-                    {runtimeBackendUrl ? (
-                      <p className="meta-line">
-                        Backend URL: <a href={runtimeBackendUrl}>{runtimeBackendUrl}</a>
-                      </p>
-                    ) : null}
-                    <div className="inline-grid">
-                      <button className="button" disabled={isStartingDevSession || hasActiveDevSession} onClick={startDevSession} type="button">
-                        {isStartingDevSession ? "Starting..." : "Start"}
-                      </button>
-                      <button className="button" disabled={!devSession || isRefreshingDevSession} onClick={() => refreshDevSession(true)} type="button">
-                        {isRefreshingDevSession ? "Refreshing..." : "Refresh"}
-                      </button>
-                    </div>
-                    {expoQrUrl ? (
-                      <div className="expo-qr-wrap">
-                        <Image alt="Expo Go QR code" className="expo-qr" height={220} src={expoQrUrl} width={220} />
-                        <p className="meta-line">Scan with Expo Go</p>
-                      </div>
-                    ) : (
-                      <p className="meta-line">Start dev session to view live app on device.</p>
-                    )}
-                  </aside>
+                  <button className="button" disabled={!devSession || isRefreshingDevSession} onClick={() => refreshDevSession(true)} type="button">
+                    {isRefreshingDevSession ? "Refreshing..." : "Refresh"}
+                  </button>
+                  <button className="button" disabled={!devSession || isCommittingDevSession} onClick={commitDevSessionChanges} type="button">
+                    {isCommittingDevSession ? "Committing..." : "Commit Changes"}
+                  </button>
+                  <button className="button" disabled={!devSession || isStoppingDevSession || devSession.status === "stopped"} onClick={stopDevSession} type="button">
+                    {isStoppingDevSession ? "Stopping..." : "Stop Session"}
+                  </button>
                 </div>
-              ) : null}
+                <div className="log-console workspace-v3-log">{devSession?.logs?.length ? devSession.logs.join("\n") : "Expo mobile logs appear when session is running."}</div>
+              </div>
+            ) : null}
 
-              {activeWorkspaceTab === "code" ? (
-                <div className="run-meta">
-                  <div className="inline-grid">
-                    <button
-                      className="button"
-                      type="button"
-                      onClick={() => {
-                        setCodeViewerScope("expo");
-                        setActiveWorkspaceTab("code");
-                      }}
-                    >
-                      Expo Files
-                    </button>
-                    <button
-                      className="button"
-                      type="button"
-                      onClick={() => {
-                        setCodeViewerScope("backend");
-                        setActiveWorkspaceTab("code");
-                      }}
-                    >
-                      Backend Files
-                    </button>
-                  </div>
-                  <select className="text-input" value={selectedCodeFile} onChange={(event) => setSelectedCodeFile(event.target.value)}>
-                    {visibleCodeFiles.length === 0 ? <option value="">No files available</option> : null}
-                    {visibleCodeFiles.map((filePath) => (
-                      <option key={filePath} value={filePath}>
-                        {filePath}
-                      </option>
-                    ))}
-                  </select>
-                  {codeError ? <p className="error-text">{codeError}</p> : null}
-                  <div className="log-console code-console">
-                    {isLoadingCode
-                      ? "Loading file..."
-                      : isBinaryCode
-                        ? "Binary file preview is not supported in viewer."
-                        : codeContent || "No file selected."}
-                  </div>
-                </div>
-              ) : null}
+            {activeTab === "backend" ? (
+              <div className="run-meta">
+                <p className="meta-line">Running: {expoBackendStatus === "ready" || expoBackendStatus === "starting" ? "yes" : "no"}</p>
+                {expoBackendUrl ? (
+                  <p className="meta-line">
+                    URL: <a href={expoBackendUrl}>{expoBackendUrl}</a>
+                  </p>
+                ) : null}
+                <div className="log-console workspace-v3-log">{expoBackendLogs?.length ? expoBackendLogs.join("\n") : "Expo backend logs appear when backend is running."}</div>
+              </div>
+            ) : null}
 
-              {activeWorkspaceTab === "runtime" ? (
-                <div className="run-meta">
-                  <p className="meta-line">Status: {devSession ? getDevSessionStatusLabel(devSession) : "not running"}</p>
-                  {devSessionFeedback ? <p className="meta-line">{devSessionFeedback}</p> : null}
-                  {devSessionError ? <p className="error-text">{devSessionError}</p> : null}
-                  {devSession?.error ? <p className="error-text">Runner: {devSession.error}</p> : null}
-                  <div className="inline-grid">
-                    <button className="button" disabled={isStartingDevSession || hasActiveDevSession} onClick={startDevSession} type="button">
-                      {isStartingDevSession ? "Starting..." : "Start Session"}
-                    </button>
-                    <button className="button" disabled={!devSession || isRefreshingDevSession} onClick={() => refreshDevSession(true)} type="button">
-                      {isRefreshingDevSession ? "Refreshing..." : "Refresh Status"}
-                    </button>
-                    <button className="button" disabled={!devSession || isCommittingDevSession} onClick={commitDevSessionChanges} type="button">
-                      {isCommittingDevSession ? "Committing..." : "Commit Changes"}
-                    </button>
-                    <button className="button" disabled={!devSession || isStoppingDevSession || devSession.status === "stopped"} onClick={stopDevSession} type="button">
-                      {isStoppingDevSession ? "Stopping..." : "Stop Session"}
-                    </button>
-                  </div>
-                  <div className="log-console">{devSession?.logs?.length ? devSession.logs.join("\n") : "No mobile dev logs yet."}</div>
-                </div>
-              ) : null}
-
-              {activeWorkspaceTab === "store" ? (
-                <div className="run-meta">
+            {activeTab === "database" ? (
+              <div className="workspace-v3-db-wrap">
+                <div className="run-meta workspace-v3-store-card">
                   <label className="field-label" htmlFor="storeDomainInput">
                     Shopify Store Domain
                   </label>
@@ -830,10 +571,9 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
                       {oauthDetail ? ` - ${oauthDetail.replaceAll("_", " ")}` : ""}. Try again.
                     </p>
                   ) : null}
-                  {customerAuth ? <p className="meta-line">Customer auth method: {customerAuth.activeMethod}</p> : null}
-                  {customerAuth ? <p className="meta-line">Customer Account API client ID: {customerApiHasClientId ? "configured" : "missing"}</p> : null}
                   {customerAuth ? (
                     <>
+                      <p className="meta-line">Customer Account API client ID: {customerApiHasClientId ? "configured" : "missing"}</p>
                       <input
                         className="text-input"
                         placeholder="Customer Account API client ID"
@@ -852,29 +592,82 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
                   ) : null}
                   {customerClientIdFeedback ? <p className="meta-line">{customerClientIdFeedback}</p> : null}
                 </div>
-              ) : null}
 
-              {activeWorkspaceTab === "logs" ? (
-                <div className="run-meta">
-                  <details className="log-details" open>
-                    <summary>Project activity logs</summary>
-                    <div className="log-console">{projectActivityLogs.length ? projectActivityLogs.join("\n") : "No project activity yet."}</div>
-                  </details>
-                  <details className="log-details" open>
-                    <summary>Mobile dev logs</summary>
-                    <div className="log-console">{devSession?.logs?.length ? devSession.logs.join("\n") : "No mobile dev logs yet."}</div>
-                  </details>
-                  <details className="log-details" open>
-                    <summary>Expo backend logs</summary>
-                    <div className="log-console">
-                      {(devSession?.expoBackendLogs ?? devSession?.backendLogs)?.length
-                        ? (devSession?.expoBackendLogs ?? devSession?.backendLogs)?.join("\n")
-                        : "No expo backend logs yet."}
+                <div className="workspace-v3-db-studio">
+                  <aside className="workspace-v3-db-sidebar">
+                    <div className="workspace-v3-db-sidebar-head">
+                      <p className="section-kicker">Tables</p>
+                      <button className="toolbar-button" onClick={() => void refreshDatabaseExplorer()} type="button">
+                        {dbLoading ? "Loading..." : "Refresh"}
+                      </button>
                     </div>
-                  </details>
+                    {dbTables.length > 0 ? (
+                      dbTables.map((tableName) => (
+                        <button
+                          className={`workspace-v3-db-table ${dbSelectedTable === tableName ? "workspace-v3-db-table-active" : ""}`}
+                          key={tableName}
+                          onClick={() => {
+                            setDbSelectedTable(tableName);
+                            void refreshDatabaseExplorer(tableName);
+                          }}
+                          type="button"
+                        >
+                          {tableName}
+                        </button>
+                      ))
+                    ) : (
+                      <p className="meta-line">No tables found.</p>
+                    )}
+                  </aside>
+
+                  <section className="workspace-v3-db-main">
+                    <header className="workspace-v3-db-main-head">
+                      <div>
+                        <p className="section-kicker">Runtime DB</p>
+                        <h3>{dbSelectedTable ?? "No table selected"}</h3>
+                      </div>
+                      <p className="meta-line">
+                        {dbName ? `${dbName} • ` : ""}
+                        {dbRowCount} rows
+                      </p>
+                    </header>
+
+                    {dbError ? <p className="error-text">{dbError}</p> : null}
+
+                    <div className="workspace-v3-db-grid-wrap">
+                      <table className="workspace-v3-db-grid">
+                        <thead>
+                          <tr>
+                            {dbColumns.map((column) => (
+                              <th key={column.name}>
+                                <span>{column.name}</span>
+                                <small>{column.type}</small>
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dbRows.map((row, rowIndex) => (
+                            <tr key={`${dbSelectedTable ?? "table"}-${rowIndex}`}>
+                              {dbColumns.map((column) => (
+                                <td key={`${rowIndex}-${column.name}`}>{renderCellValue(row[column.name])}</td>
+                              ))}
+                            </tr>
+                          ))}
+                          {dbRows.length === 0 ? (
+                            <tr>
+                              <td className="workspace-v3-db-empty" colSpan={Math.max(dbColumns.length, 1)}>
+                                {dbLoading ? "Loading rows..." : "No rows to display."}
+                              </td>
+                            </tr>
+                          ) : null}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
                 </div>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
           </div>
         </div>
       </section>
