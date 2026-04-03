@@ -1,17 +1,7 @@
 import { NextRequest } from "next/server";
-import {
-  getRuntimeCustomerAuthSession,
-  markRuntimeCustomerAuthSessionCompleted,
-  markRuntimeCustomerAuthSessionExpired,
-  markRuntimeCustomerAuthSessionFailed
-} from "@/lib/project-runtime-db";
-import { getProjectRuntimeSecrets } from "@/lib/runtime-sync";
-import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
-import {
-  exchangeCustomerAuthCode,
-  getCustomerAuthCallbackUrl,
-  verifyCustomerAuthState,
-} from "@/lib/shopify-customer-auth";
+import { getProject } from "@/lib/db";
+import { completeRuntimeCustomerAuthCallback, resolveProjectRuntimeBaseUrl } from "@/lib/runtime-admin-client";
+import { verifyCustomerAuthState } from "@/lib/shopify-customer-auth";
 import { normalizeShopDomain } from "@/lib/shopify";
 
 export const runtime = "nodejs";
@@ -81,10 +71,6 @@ function renderResultHtml(status: "success" | "error", message: string): string 
 </html>`;
 }
 
-async function failSession(databaseUrl: string, sessionId: string, error: string): Promise<void> {
-  await markRuntimeCustomerAuthSessionFailed(databaseUrl, sessionId, error);
-}
-
 export async function GET(request: NextRequest) {
   const rawShop = request.nextUrl.searchParams.get("shop");
   const code = request.nextUrl.searchParams.get("code")?.trim();
@@ -118,113 +104,47 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const runtimeSecrets = await getProjectRuntimeSecrets(parsedState.projectId);
-  const parsedSecrets = parseRuntimeSecrets(runtimeSecrets);
-  const runtimeDatabaseUrl = parsedSecrets.runtime?.database?.databaseUrl;
-
-  if (!runtimeDatabaseUrl) {
-    return new Response(renderResultHtml("error", "Runtime database is not configured for this project."), {
-      status: 409,
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
-  }
-
-  const shopDomain = parsedSecrets.shopify?.shopDomain;
-  if (!shopDomain || shopDomain !== parsedState.shopDomain) {
-    return new Response(renderResultHtml("error", "Project auth context was not found. Please retry sign in."), {
-      status: 404,
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
-  }
-
-  const session = await getRuntimeCustomerAuthSession(runtimeDatabaseUrl, parsedState.sessionId);
-  if (!session) {
-    return new Response(renderResultHtml("error", "Auth session was not found. Please retry sign in."), {
-      status: 404,
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
-  }
-
-  if (session.status === "failed") {
-    return new Response(renderResultHtml("error", session.error ?? "Customer auth failed."), {
-      status: 400,
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
-  }
-
-  if (session.status === "expired") {
-    return new Response(renderResultHtml("error", session.error ?? "Customer auth session expired."), {
-      status: 400,
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
-  }
-
-  if (session.status === "completed" || session.status === "consumed") {
-    return new Response(
-      renderResultHtml("success", "Sign in already completed. You can return to the app and continue."),
-      {
-        status: 200,
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-      }
-    );
-  }
-
-  const expiresAtMs = Date.parse(session.expiresAt);
-  if (Number.isFinite(expiresAtMs) && expiresAtMs < Date.now()) {
-    await markRuntimeCustomerAuthSessionExpired(runtimeDatabaseUrl, session.id);
-    return new Response(renderResultHtml("error", "Customer auth session expired."), {
-      status: 400,
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
-  }
-
-  if (oauthError) {
-    const message = oauthErrorDescription || oauthError;
-    await failSession(runtimeDatabaseUrl, session.id, message);
-    return new Response(renderResultHtml("error", message), {
-      status: 400,
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
-  }
-
-  const tokenEndpoint = parsedSecrets.shopify?.customerAuth?.customerAccountApi.tokenEndpoint;
-  const clientId = parsedSecrets.shopify?.customerAuth?.customerAccountApi.clientId;
-  const callbackUrl =
-    parsedSecrets.shopify?.customerAuth?.customerAccountApi.callbackUrl || getCustomerAuthCallbackUrl(request.nextUrl.origin);
-
-  if (!tokenEndpoint || !clientId || !callbackUrl || !code || !session.codeVerifier) {
-    await failSession(runtimeDatabaseUrl, session.id, "Customer Account API configuration is incomplete.");
-    return new Response(renderResultHtml("error", "Customer Account API configuration is incomplete."), {
-      status: 409,
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
-  }
-
   try {
-    const tokenSet = await exchangeCustomerAuthCode({
-      tokenEndpoint,
-      clientId,
+    const project = await getProject(parsedState.projectId);
+    if (!project) {
+      return new Response(renderResultHtml("error", "Project not found. Start sign in again."), {
+        status: 404,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+
+    const runtimeBaseUrl = resolveProjectRuntimeBaseUrl(project);
+    if (!runtimeBaseUrl) {
+      return new Response(renderResultHtml("error", "Expo backend URL is unavailable for this project session."), {
+        status: 409,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+
+    const upstream = await completeRuntimeCustomerAuthCallback(runtimeBaseUrl, {
+      sessionId: parsedState.sessionId,
       code,
-      codeVerifier: session.codeVerifier,
-      redirectUri: callbackUrl,
+      oauthError,
+      oauthErrorDescription,
+      shopDomain: parsedState.shopDomain
     });
 
-    await markRuntimeCustomerAuthSessionCompleted({
-      databaseUrl: runtimeDatabaseUrl,
-      sessionId: session.id,
-      tokenPayloadEncrypted: JSON.stringify(tokenSet)
-    });
-
-    return new Response(
-      renderResultHtml("success", "Sign in succeeded. You can return to the app and continue."),
-      {
+    const upstreamStatus = upstream.payload?.status;
+    if (upstream.ok && (upstreamStatus === "completed" || upstreamStatus === "already_completed")) {
+      return new Response(renderResultHtml("success", "Sign in succeeded. You can return to the app and continue."), {
         status: 200,
         headers: { "Content-Type": "text/html; charset=utf-8" },
-      }
-    );
+      });
+    }
+
+    const message = upstream.error || upstream.payload?.error || "Failed to complete customer auth callback.";
+    const statusCode = upstream.status >= 400 && upstream.status < 600 ? upstream.status : 500;
+    return new Response(renderResultHtml("error", message), {
+      status: statusCode,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
   } catch (caught) {
-    const message = caught instanceof Error ? caught.message : "Failed to exchange auth code.";
-    await failSession(runtimeDatabaseUrl, session.id, message);
+    const message = caught instanceof Error ? caught.message : "Failed to complete customer auth callback.";
     return new Response(renderResultHtml("error", message), {
       status: 500,
       headers: { "Content-Type": "text/html; charset=utf-8" },

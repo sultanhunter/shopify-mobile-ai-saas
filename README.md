@@ -49,6 +49,7 @@ External runner server endpoints (`Desktop/shopify-mobile-runner-server`):
 - `POST /api/shopify-mobile/dev-session/:sessionId/apply-and-push` - write files, commit, push
 - `POST /api/shopify-mobile/dev-session/:sessionId/stop` - stop Expo process
 - `ANY /api/shopify-mobile/dev-session/:sessionId/web/*` - reverse proxy to live Expo web session
+- `POST /api/shopify-mobile/runtime-db/provision` - provision per-project Postgres DB + role
 
 ## Expo Scaffold Source
 
@@ -103,10 +104,12 @@ cp .env.example .env.local
 - Set `RUNNER_SERVER_BASE_URL` to your runner server (for example `http://localhost:3100`)
 - Set `RUNNER_SERVER_TOKEN` to match `RUNNER_SERVER_TOKEN` on the runner server
 - Set `RUNTIME_SYNC_TOKEN` (shared with runner/runtime backend)
-- Set Neon runtime provisioning envs:
-  - `NEON_ADMIN_DATABASE_URL`
-  - `NEON_RUNTIME_DATABASE_PREFIX` (optional)
-  - `NEON_RUNTIME_ROLE_PREFIX` (optional)
+- Set runtime DB provisioning envs:
+  - `RUNTIME_DB_PROVISIONER` (`auto`/`direct`/`runner`)
+  - `RUNTIME_ADMIN_DATABASE_URL` (required for `direct` mode)
+  - `RUNTIME_DATABASE_PREFIX` (optional)
+  - `RUNTIME_ROLE_PREFIX` (optional)
+  - Legacy aliases remain supported: `NEON_ADMIN_DATABASE_URL`, `NEON_RUNTIME_DATABASE_PREFIX`, `NEON_RUNTIME_ROLE_PREFIX`
 - Set `EXPO_SCAFFOLD_SERVER_BASE_URL` if scaffold service runs on a different server
 - Set `EXPO_SCAFFOLD_SERVER_TOKEN` if scaffold token differs from runner token
 - Optional: switch provider/model via `LLM_PROVIDER` and `LLM_MODEL`
@@ -117,6 +120,10 @@ cp .env.example .env.local
 - Set `VERTEX_API_KEY`
 - Set `VERTEX_MODEL` (default is `gemini-3.1-flash-lite-preview`)
 - Set `RUNNER_SERVER_TOKEN` to a shared secret
+- If provisioning DB through runner, set:
+  - `RUNNER_RUNTIME_ADMIN_DATABASE_URL`
+  - `RUNNER_RUNTIME_DATABASE_PREFIX` (optional)
+  - `RUNNER_RUNTIME_ROLE_PREFIX` (optional)
 - Ensure `npx` is available for `create-expo-app` scaffolding
 
 5. Install and run

@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getProject } from "@/lib/db";
-import { getProjectRuntimeSecrets } from "@/lib/runtime-sync";
-import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
-import { refreshCustomerAuthToken } from "@/lib/shopify-customer-auth";
+import { proxyRuntimeCustomerAuthRefresh, resolveProjectRuntimeBaseUrl } from "@/lib/runtime-admin-client";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -29,21 +27,18 @@ export async function POST(request: NextRequest, { params }: Params) {
       return NextResponse.json({ error: "Project not found." }, { status: 404 });
     }
 
-    const runtimeSecrets = await getProjectRuntimeSecrets(project.id);
-    const parsed = parseRuntimeSecrets(runtimeSecrets);
-    const tokenEndpoint = parsed.shopify?.customerAuth?.customerAccountApi.tokenEndpoint;
-    const clientId = parsed.shopify?.customerAuth?.customerAccountApi.clientId;
-    if (!tokenEndpoint || !clientId) {
-      return NextResponse.json({ error: "Customer Account API token refresh is unavailable." }, { status: 409 });
+    const runtimeBaseUrl = resolveProjectRuntimeBaseUrl(project);
+    if (!runtimeBaseUrl) {
+      return NextResponse.json(
+        { error: "Expo backend URL is unavailable. Start or refresh the dev session and retry." },
+        { status: 409 }
+      );
     }
 
-    const tokens = await refreshCustomerAuthToken({
-      tokenEndpoint,
-      clientId,
-      refreshToken,
+    const upstream = await proxyRuntimeCustomerAuthRefresh(runtimeBaseUrl, refreshToken);
+    return NextResponse.json(upstream.payload ?? { error: upstream.error ?? "Failed to refresh customer auth token." }, {
+      status: upstream.status
     });
-
-    return NextResponse.json({ tokens });
   } catch (caught) {
     return NextResponse.json(
       {

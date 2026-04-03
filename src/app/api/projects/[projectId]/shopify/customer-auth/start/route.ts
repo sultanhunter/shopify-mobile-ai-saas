@@ -1,15 +1,6 @@
-import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getProject } from "@/lib/db";
-import {
-  buildCustomerAuthorizeUrl,
-  createCustomerAuthState,
-  createPkcePair,
-  normalizeCustomerApiScopes,
-} from "@/lib/shopify-customer-auth";
-import { createRuntimeCustomerAuthSession, runRuntimeProjectMigrations } from "@/lib/project-runtime-db";
-import { getProjectRuntimeSecrets } from "@/lib/runtime-sync";
-import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
+import { proxyRuntimeCustomerAuthStart, resolveProjectRuntimeBaseUrl } from "@/lib/runtime-admin-client";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -27,73 +18,17 @@ export async function POST(_: Request, { params }: Params) {
       return NextResponse.json({ error: "Project not found." }, { status: 404 });
     }
 
-    const runtimeSecrets = await getProjectRuntimeSecrets(project.id);
-    const parsed = parseRuntimeSecrets(runtimeSecrets);
-
-    const shopDomain = parsed.shopify?.shopDomain?.trim().toLowerCase();
-    const auth = parsed.shopify?.customerAuth;
-    const runtimeDatabaseUrl = parsed.runtime?.database?.databaseUrl;
-
-    if (!shopDomain || !auth || !runtimeDatabaseUrl) {
-      return NextResponse.json({ error: "Shopify customer auth is not configured." }, { status: 400 });
-    }
-
-    const clientId = auth.customerAccountApi.clientId;
-    const authorizationEndpoint = auth.customerAccountApi.authorizationEndpoint;
-    const callbackUrl = auth.customerAccountApi.callbackUrl;
-    const normalizedScopes = normalizeCustomerApiScopes(auth.customerAccountApi.scopes);
-    if (!auth.customerAccountApi.enabled || !clientId || !authorizationEndpoint || !callbackUrl) {
+    const runtimeBaseUrl = resolveProjectRuntimeBaseUrl(project);
+    if (!runtimeBaseUrl) {
       return NextResponse.json(
-        {
-          error: "Customer Account API auth is not available for this store.",
-        },
+        { error: "Expo backend URL is unavailable. Start or refresh the dev session and retry." },
         { status: 409 }
       );
     }
 
-    const apiSecret = process.env.SHOPIFY_API_SECRET?.trim();
-    if (apiSecret && clientId === apiSecret) {
-      return NextResponse.json(
-        {
-          error:
-            "Customer Account API client_id is misconfigured. Use SHOPIFY_API_KEY (or proper Customer Account API client ID), not SHOPIFY_API_SECRET.",
-        },
-        { status: 500 }
-      );
-    }
-
-    await runRuntimeProjectMigrations(runtimeDatabaseUrl).catch(() => null);
-
-    const sessionId = randomUUID();
-    const sessionExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-    const pkce = createPkcePair();
-    const state = createCustomerAuthState({
-      projectId: project.id,
-      shopDomain,
-      sessionId,
-    });
-
-    const authUrl = buildCustomerAuthorizeUrl({
-      authorizationEndpoint,
-      clientId,
-      redirectUri: callbackUrl,
-      scopes: normalizedScopes,
-      state,
-      codeChallenge: pkce.codeChallenge,
-    });
-
-    await createRuntimeCustomerAuthSession({
-      databaseUrl: runtimeDatabaseUrl,
-      sessionId,
-      codeVerifier: pkce.codeVerifier,
-      expiresAt: sessionExpiresAt,
-    });
-
-    return NextResponse.json({
-      sessionId,
-      status: "pending",
-      expiresAt: sessionExpiresAt,
-      authUrl,
+    const upstream = await proxyRuntimeCustomerAuthStart(runtimeBaseUrl);
+    return NextResponse.json(upstream.payload ?? { error: upstream.error ?? "Failed to start customer auth." }, {
+      status: upstream.status
     });
   } catch (caught) {
     return NextResponse.json(

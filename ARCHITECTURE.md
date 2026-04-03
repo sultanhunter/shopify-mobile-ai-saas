@@ -1,6 +1,6 @@
 # Architecture Reference
 
-Last updated: 2026-04-02
+Last updated: 2026-04-03
 Version: v2.0.0
 
 This document reflects the runtime-owned architecture.
@@ -66,7 +66,7 @@ This document reflects the runtime-owned architecture.
 ### 2.2 Shopify Connect + Runtime Provisioning
 
 1. SaaS completes Shopify OAuth and receives admin token.
-2. SaaS provisions Neon per-project runtime DB (if missing).
+2. SaaS provisions per-project runtime DB (if missing), either directly or through runner.
 3. SaaS runs runtime DB migrations (`runtime_sync_state`, `customer_auth_sessions`).
 4. SaaS writes:
    - non-secret runtime config -> `project_runtime_config`
@@ -120,9 +120,11 @@ Project secrets include (stored only in encrypted runtime secrets):
 - `SHOPIFY_API_SECRET`
 - `SHOPIFY_TOKEN_ENCRYPTION_SECRET`
 - `SHOPIFY_OAUTH_STATE_SECRET`
-- `NEON_ADMIN_DATABASE_URL`
-- `NEON_RUNTIME_DATABASE_PREFIX` (optional)
-- `NEON_RUNTIME_ROLE_PREFIX` (optional)
+- `RUNTIME_DB_PROVISIONER` (`auto`/`direct`/`runner`)
+- `RUNTIME_ADMIN_DATABASE_URL` (required when using direct mode)
+- `RUNTIME_DATABASE_PREFIX` (optional)
+- `RUNTIME_ROLE_PREFIX` (optional)
+- Legacy aliases: `NEON_ADMIN_DATABASE_URL`, `NEON_RUNTIME_DATABASE_PREFIX`, `NEON_RUNTIME_ROLE_PREFIX`
 - `RUNTIME_SYNC_TOKEN` (recommended)
 
 ### Runner
@@ -133,6 +135,9 @@ Project secrets include (stored only in encrypted runtime secrets):
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `GITHUB_TOKEN`
 - `RUNNER_REQUIRE_GITHUB_REPO=true`
+- `RUNNER_RUNTIME_ADMIN_DATABASE_URL` (if runner provisions project DBs)
+- `RUNNER_RUNTIME_DATABASE_PREFIX` (optional)
+- `RUNNER_RUNTIME_ROLE_PREFIX` (optional)
 
 ## 5) Operational Notes
 

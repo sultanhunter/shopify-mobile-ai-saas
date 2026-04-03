@@ -1,4 +1,5 @@
 import { DevSessionState } from "@/lib/models";
+import { RuntimeProjectDatabase } from "@/lib/runtime-database";
 
 interface DevRunnerSessionResponse {
   session?: DevSessionState;
@@ -27,6 +28,16 @@ interface DevRunnerRepoFileResponse {
 interface DevRunnerRepoApplyResponse {
   written?: string[];
   fileIndex?: string[];
+  error?: string;
+}
+
+interface DevRunnerRuntimeDatabaseResponse {
+  runtimeDatabase?: {
+    provider?: string;
+    databaseName?: string;
+    roleName?: string;
+    databaseUrl?: string;
+  };
   error?: string;
 }
 
@@ -285,4 +296,43 @@ export async function applyFilesToProjectRepo(input: {
     written: payload.written,
     fileIndex: payload.fileIndex,
   };
+}
+
+function normalizeRuntimeDatabase(payload: DevRunnerRuntimeDatabaseResponse | null): RuntimeProjectDatabase | null {
+  const runtimeDatabase = payload?.runtimeDatabase;
+  if (!runtimeDatabase) {
+    return null;
+  }
+
+  const provider = runtimeDatabase.provider?.trim();
+  const databaseName = runtimeDatabase.databaseName?.trim();
+  const roleName = runtimeDatabase.roleName?.trim();
+  const databaseUrl = runtimeDatabase.databaseUrl?.trim();
+
+  if (!provider || !databaseName || !roleName || !databaseUrl) {
+    return null;
+  }
+
+  return {
+    provider,
+    databaseName,
+    roleName,
+    databaseUrl
+  };
+}
+
+export async function provisionRuntimeDatabaseOnRunner(projectId: string): Promise<RuntimeProjectDatabase> {
+  const response = await fetch(`${getDevRunnerBaseUrl()}/api/shopify-mobile/runtime-db/provision`, {
+    method: "POST",
+    headers: buildHeaders(),
+    body: JSON.stringify({ projectId })
+  });
+
+  const payload = await parseJson<DevRunnerRuntimeDatabaseResponse>(response);
+  const runtimeDatabase = normalizeRuntimeDatabase(payload);
+  if (!response.ok || !runtimeDatabase) {
+    throw new Error(await buildUpstreamError(response, "Failed to provision runtime database", payload?.error));
+  }
+
+  return runtimeDatabase;
 }

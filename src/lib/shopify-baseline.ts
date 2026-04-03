@@ -709,6 +709,9 @@ The API starts on \`http://localhost:4100\` by default.
 - \`GET /api/customer-auth/session/:sessionId\`
 - \`POST /api/customer-auth/refresh\`
 - \`POST /internal/runtime/sync\`
+- \`POST /internal/admin/customer-auth/callback\`
+
+Internal routes use bearer auth with \`RUNTIME_SYNC_TOKEN\`.
 `;
 }
 
@@ -1466,6 +1469,111 @@ export function createCustomerAuthAdapter(config) {
 
       return { status: "pending" };
     },
+    async completeFromCallback(input) {
+      const runtimeState = await getRuntimeState(config);
+      const shopify = getShopifySecrets(runtimeState);
+      const pool = await getRuntimePool(runtimeState);
+
+      const sessionId = typeof input?.sessionId === "string" ? input.sessionId.trim() : "";
+      if (!sessionId) {
+        throw new Error("sessionId is required.");
+      }
+
+      const result = await pool.query(
+        "select id, status, code_verifier, token_payload_encrypted, error, expires_at from customer_auth_sessions where id = $1 limit 1",
+        [sessionId]
+      );
+
+      const row = result.rows[0];
+      if (!row) {
+        return { status: "not_found", error: "Customer auth session not found." };
+      }
+
+      const status = typeof row.status === "string" ? row.status : "pending";
+      if (status === "completed" || status === "consumed") {
+        return { status: "already_completed" };
+      }
+
+      if (status === "failed") {
+        return {
+          status: "failed",
+          error: typeof row.error === "string" ? row.error : "Customer auth failed."
+        };
+      }
+
+      if (status === "expired") {
+        return {
+          status: "expired",
+          error: typeof row.error === "string" ? row.error : "Customer auth session expired."
+        };
+      }
+
+      const expectedShopDomain = typeof input?.shopDomain === "string" ? input.shopDomain.trim().toLowerCase() : "";
+      if (expectedShopDomain && expectedShopDomain !== shopify.shopDomain) {
+        return { status: "failed", error: "Shop domain mismatch in callback." };
+      }
+
+      const expiresAt =
+        typeof row.expires_at === "string"
+          ? row.expires_at
+          : row.expires_at instanceof Date
+            ? row.expires_at.toISOString()
+            : "";
+      const expiresAtMs = Date.parse(expiresAt);
+      if (Number.isFinite(expiresAtMs) && expiresAtMs < Date.now()) {
+        await pool.query(
+          "update customer_auth_sessions set status = 'expired', error = coalesce(error, 'Customer auth session expired.'), code_verifier = null, updated_at = now() where id = $1",
+          [sessionId]
+        );
+        return { status: "expired", error: "Customer auth session expired." };
+      }
+
+      const oauthError = typeof input?.oauthError === "string" ? input.oauthError.trim() : "";
+      const oauthErrorDescription =
+        typeof input?.oauthErrorDescription === "string" ? input.oauthErrorDescription.trim() : "";
+      if (oauthError) {
+        const message = oauthErrorDescription || oauthError;
+        await pool.query(
+          "update customer_auth_sessions set status = 'failed', error = $2, code_verifier = null, updated_at = now() where id = $1",
+          [sessionId, message]
+        );
+        return { status: "failed", error: message };
+      }
+
+      const code = typeof input?.code === "string" ? input.code.trim() : "";
+      const codeVerifier = typeof row.code_verifier === "string" ? row.code_verifier : "";
+      const tokenEndpoint =
+        typeof shopify.customerAccountApi.tokenEndpoint === "string"
+          ? shopify.customerAccountApi.tokenEndpoint
+          : "";
+      const clientId = typeof shopify.customerAccountApi.clientId === "string" ? shopify.customerAccountApi.clientId : "";
+      const callbackUrl =
+        typeof shopify.customerAccountApi.callbackUrl === "string" ? shopify.customerAccountApi.callbackUrl : "";
+
+      if (!tokenEndpoint || !clientId || !callbackUrl || !code || !codeVerifier) {
+        const message = "Customer Account API configuration is incomplete.";
+        await pool.query(
+          "update customer_auth_sessions set status = 'failed', error = $2, code_verifier = null, updated_at = now() where id = $1",
+          [sessionId, message]
+        );
+        return { status: "failed", error: message };
+      }
+
+      const body = new URLSearchParams();
+      body.set("grant_type", "authorization_code");
+      body.set("client_id", clientId);
+      body.set("redirect_uri", callbackUrl);
+      body.set("code", code);
+      body.set("code_verifier", codeVerifier);
+
+      const tokenSet = await postTokenRequest(tokenEndpoint, body);
+      await pool.query(
+        "update customer_auth_sessions set status = 'completed', token_payload_encrypted = $2, error = null, code_verifier = null, updated_at = now() where id = $1",
+        [sessionId, JSON.stringify(tokenSet)]
+      );
+
+      return { status: "completed" };
+    },
     async refresh(refreshToken) {
       const runtimeState = await getRuntimeState(config);
       const shopify = getShopifySecrets(runtimeState);
@@ -1615,6 +1723,53 @@ app.post(
       appliedVersion: next.version,
       ignored: false
     });
+  })
+);
+
+app.post(
+  "/internal/admin/customer-auth/callback",
+  asyncRoute(async (request, response) => {
+    if (!runtimeConfig.runtimeSyncToken) {
+      response.status(503).json({ error: "Internal admin routes require RUNTIME_SYNC_TOKEN." });
+      return;
+    }
+
+    if (!isRuntimeSyncAuthorized(request)) {
+      response.status(401).json({ error: "Unauthorized internal admin request." });
+      return;
+    }
+
+    const sessionId = typeof request.body?.sessionId === "string" ? request.body.sessionId.trim() : "";
+    if (!sessionId) {
+      response.status(400).json({ error: "sessionId is required." });
+      return;
+    }
+
+    const payload = await customerAuthAdapter.completeFromCallback({
+      sessionId,
+      code: typeof request.body?.code === "string" ? request.body.code : undefined,
+      oauthError: typeof request.body?.oauthError === "string" ? request.body.oauthError : undefined,
+      oauthErrorDescription:
+        typeof request.body?.oauthErrorDescription === "string" ? request.body.oauthErrorDescription : undefined,
+      shopDomain: typeof request.body?.shopDomain === "string" ? request.body.shopDomain : undefined
+    });
+
+    if (payload.status === "completed" || payload.status === "already_completed") {
+      response.json(payload);
+      return;
+    }
+
+    if (payload.status === "not_found") {
+      response.status(404).json(payload);
+      return;
+    }
+
+    if (payload.status === "failed" || payload.status === "expired") {
+      response.status(400).json(payload);
+      return;
+    }
+
+    response.status(500).json({ error: "Failed to complete customer auth callback." });
   })
 );
 
@@ -2456,7 +2611,7 @@ export function renderShopifyBaselineFiles(input: ShopifyBaselineInput): Record<
     [toWorkspacePath(expoBackendDir, "src/adapters/customer-auth-adapter.js")]: renderRuntimeBackendCustomerAuthAdapter(),
     ".shopify-baseline.json": JSON.stringify(
       {
-        version: 3,
+        version: 4,
         appliedAt: new Date().toISOString(),
         shopDomain: input.shopDomain,
         mobileAppDir,

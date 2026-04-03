@@ -27,8 +27,7 @@ import {
   ShopifyCustomerAuthState,
   WorkspaceLayout,
 } from "@/lib/models";
-import { provisionNeonRuntimeDatabase } from "@/lib/neon-runtime";
-import { runRuntimeProjectMigrations } from "@/lib/project-runtime-db";
+import { provisionRuntimeProjectDatabase } from "@/lib/runtime-db-provisioning";
 import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
 
 const CLIENT_ID_CONFIGURED_SENTINEL = "__configured__";
@@ -149,12 +148,10 @@ async function buildRuntimeDatabaseSecretsPatch(projectId: string, currentSecret
   const parsed = parseRuntimeSecrets(currentSecrets);
   const existingDatabaseUrl = parsed.runtime?.database?.databaseUrl?.trim();
   if (existingDatabaseUrl) {
-    await runRuntimeProjectMigrations(existingDatabaseUrl).catch(() => null);
     return {};
   }
 
-  const provisioned = await provisionNeonRuntimeDatabase(projectId);
-  await runRuntimeProjectMigrations(provisioned.databaseUrl);
+  const provisioned = await provisionRuntimeProjectDatabase(projectId);
 
   return {
     runtime: {

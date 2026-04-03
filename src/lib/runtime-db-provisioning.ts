@@ -1,22 +1,33 @@
 import { randomBytes } from "node:crypto";
 import { Pool } from "pg";
+import { provisionRuntimeDatabaseOnRunner } from "@/lib/dev-runner";
+import { RuntimeProjectDatabase } from "@/lib/runtime-database";
 
 const POSTGRES_IDENTIFIER_MAX_LENGTH = 63;
 
-interface NeonRuntimeDatabase {
-  provider: "neon";
-  databaseName: string;
-  roleName: string;
-  databaseUrl: string;
-}
+function getRuntimeProvisioningMode(): "auto" | "direct" | "runner" {
+  const raw =
+    process.env.RUNTIME_DB_PROVISIONER?.trim().toLowerCase() ||
+    process.env.NEON_RUNTIME_PROVISIONER?.trim().toLowerCase() ||
+    "auto";
 
-function getNeonAdminDatabaseUrl(): string {
-  const value = process.env.NEON_ADMIN_DATABASE_URL?.trim();
-  if (!value) {
-    throw new Error("NEON_ADMIN_DATABASE_URL is required for Neon runtime provisioning.");
+  if (raw === "direct" || raw === "runner") {
+    return raw;
   }
 
-  return value;
+  return "auto";
+}
+
+function getRuntimeAdminDatabaseUrl(): string | undefined {
+  return process.env.RUNTIME_ADMIN_DATABASE_URL?.trim() || process.env.NEON_ADMIN_DATABASE_URL?.trim() || undefined;
+}
+
+function getRuntimeDatabasePrefix(): string {
+  return process.env.RUNTIME_DATABASE_PREFIX?.trim() || process.env.NEON_RUNTIME_DATABASE_PREFIX?.trim() || "shopify_runtime_";
+}
+
+function getRuntimeRolePrefix(): string {
+  return process.env.RUNTIME_ROLE_PREFIX?.trim() || process.env.NEON_RUNTIME_ROLE_PREFIX?.trim() || "shopify_runtime_";
 }
 
 function sanitizeIdentifier(input: string, fallbackPrefix: string): string {
@@ -38,7 +49,10 @@ function buildProjectName(prefix: string, projectId: string, fallbackPrefix: str
   return sanitizeIdentifier(raw, fallbackPrefix);
 }
 
-function makeRuntimeDatabaseUrl(adminDatabaseUrl: string, params: { roleName: string; password: string; databaseName: string }): string {
+function makeRuntimeDatabaseUrl(
+  adminDatabaseUrl: string,
+  params: { roleName: string; password: string; databaseName: string }
+): string {
   const url = new URL(adminDatabaseUrl);
   url.username = params.roleName;
   url.password = params.password;
@@ -59,17 +73,15 @@ function createAdminPool(connectionString: string): Pool {
   });
 }
 
-export async function provisionNeonRuntimeDatabase(projectId: string): Promise<NeonRuntimeDatabase> {
-  const adminDatabaseUrl = getNeonAdminDatabaseUrl();
-  const databasePrefix = process.env.NEON_RUNTIME_DATABASE_PREFIX?.trim() || "shopify_runtime_";
-  const rolePrefix = process.env.NEON_RUNTIME_ROLE_PREFIX?.trim() || "shopify_runtime_";
-
-  const databaseName = buildProjectName(databasePrefix, projectId, "runtime_db");
-  const roleName = buildProjectName(rolePrefix, projectId, "runtime_role");
+async function provisionRuntimeProjectDatabaseDirect(
+  projectId: string,
+  adminDatabaseUrl: string
+): Promise<RuntimeProjectDatabase> {
+  const databaseName = buildProjectName(getRuntimeDatabasePrefix(), projectId, "runtime_db");
+  const roleName = buildProjectName(getRuntimeRolePrefix(), projectId, "runtime_role");
   const rolePassword = randomBytes(24).toString("hex");
 
   const pool = createAdminPool(adminDatabaseUrl);
-
   try {
     const roleExists = await pool.query("select 1 from pg_roles where rolname = $1 limit 1", [roleName]);
     if (roleExists.rowCount && roleExists.rowCount > 0) {
@@ -89,7 +101,7 @@ export async function provisionNeonRuntimeDatabase(projectId: string): Promise<N
   }
 
   return {
-    provider: "neon",
+    provider: "postgres",
     databaseName,
     roleName,
     databaseUrl: makeRuntimeDatabaseUrl(adminDatabaseUrl, {
@@ -98,4 +110,27 @@ export async function provisionNeonRuntimeDatabase(projectId: string): Promise<N
       databaseName
     })
   };
+}
+
+export async function provisionRuntimeProjectDatabase(projectId: string): Promise<RuntimeProjectDatabase> {
+  const mode = getRuntimeProvisioningMode();
+  const adminDatabaseUrl = getRuntimeAdminDatabaseUrl();
+
+  if (mode === "runner") {
+    return provisionRuntimeDatabaseOnRunner(projectId);
+  }
+
+  if (mode === "direct") {
+    if (!adminDatabaseUrl) {
+      throw new Error("RUNTIME_ADMIN_DATABASE_URL is required when RUNTIME_DB_PROVISIONER=direct.");
+    }
+
+    return provisionRuntimeProjectDatabaseDirect(projectId, adminDatabaseUrl);
+  }
+
+  if (adminDatabaseUrl) {
+    return provisionRuntimeProjectDatabaseDirect(projectId, adminDatabaseUrl);
+  }
+
+  return provisionRuntimeDatabaseOnRunner(projectId);
 }
