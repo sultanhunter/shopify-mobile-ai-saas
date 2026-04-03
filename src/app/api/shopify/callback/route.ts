@@ -39,6 +39,20 @@ function mapStoreConnectFailure(error: unknown): { reason: string; detail?: stri
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
   const stageMatch = message.match(/runtime db provisioning failed at ([a-z_]+):/);
   const stage = stageMatch?.[1];
+  const storeSetupStageMatch = message.match(/store setup failed at ([a-z_]+):/);
+  const storeSetupStage = storeSetupStageMatch?.[1];
+  const isRuntimeDbContext =
+    message.includes("runtime db") ||
+    message.includes("runtime database") ||
+    message.includes("runtime-db") ||
+    message.includes("provision runtime database");
+
+  if (message.includes("failed to apply repository files")) {
+    return {
+      reason: "baseline_apply_failed",
+      detail: "runner_repo_apply_failed"
+    };
+  }
 
   if (message.includes("not neon pooler") || message.includes("direct postgres host") || message.includes("pooler")) {
     return { reason: "runtime_db_admin_url_invalid", detail: "use_direct_db_host_not_pooler" };
@@ -60,14 +74,40 @@ function mapStoreConnectFailure(error: unknown): { reason: string; detail?: stri
     return { reason: "runtime_db_admin_auth_failed", detail: "check_admin_db_password" };
   }
 
-  if (message.includes("getaddrinfo") || message.includes("enotfound") || message.includes("timed out") || message.includes("etimedout")) {
+  if (
+    storeSetupStage &&
+    (message.includes("failed to provision runtime database") ||
+      message.includes("runtime db provisioning failed") ||
+      message.includes("runtime database"))
+  ) {
+    return {
+      reason: "runtime_db_provision_failed",
+      detail: `failed_at_${storeSetupStage}`
+    };
+  }
+
+  if (
+    isRuntimeDbContext &&
+    (message.includes("getaddrinfo") || message.includes("enotfound") || message.includes("timed out") || message.includes("etimedout"))
+  ) {
     return { reason: "runtime_db_admin_unreachable", detail: "check_db_host_network_dns" };
+  }
+
+  if (message.includes("getaddrinfo") || message.includes("enotfound") || message.includes("timed out") || message.includes("etimedout")) {
+    return { reason: "store_connect_timed_out", detail: "check_runner_network_or_load" };
   }
 
   if (message.includes("runtime db provisioning failed at")) {
     return {
       reason: "runtime_db_provision_failed",
       detail: stage ? `failed_at_${stage}` : "check_runner_logs_for_stage"
+    };
+  }
+
+  if (storeSetupStage) {
+    return {
+      reason: "store_setup_failed",
+      detail: `failed_at_${storeSetupStage}`
     };
   }
 

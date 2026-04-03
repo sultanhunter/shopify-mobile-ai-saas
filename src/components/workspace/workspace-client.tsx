@@ -24,6 +24,8 @@ const OPERATIONAL_MESSAGE_PREFIXES = [
   "Dev session no longer exists on runner.",
   "Dev session was already gone on runner",
   "Dev session not found on runner during commit.",
+  "Store setup:",
+  "Store setup failed:",
   "Store connected:",
   "Expo scaffold warnings:"
 ];

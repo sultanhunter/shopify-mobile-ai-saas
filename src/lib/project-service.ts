@@ -272,6 +272,14 @@ function buildCommitMessage(prefix: "chore" | "feat", summary: string): string {
   return `${prefix}(ai): ${compact}`;
 }
 
+async function appendProjectOperationMessage(projectId: string, content: string): Promise<void> {
+  await updateProject(projectId, (current) => ({
+    ...current,
+    updatedAt: new Date().toISOString(),
+    messages: [...current.messages, createAssistantMessage(content)]
+  }));
+}
+
 async function resolveRepoFileIndex(projectId: string, fallback: string[]): Promise<string[]> {
   try {
     return await listProjectRepoFiles(projectId);
@@ -311,7 +319,22 @@ export async function connectStoreToProject(params: {
     throw new Error("Project not found");
   }
 
+  let stage = "initializing";
+
+  const failStoreSetup = async (error: unknown): Promise<never> => {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      await appendProjectOperationMessage(project.id, `Store setup failed: ${domain} (${stage}) - ${message}`);
+    } catch {
+      // Best effort log only.
+    }
+
+    throw new Error(`Store setup failed at ${stage}: ${message}`);
+  };
+
   const workspaceLayout = resolveWorkspaceLayout(project);
+
+  await appendProjectOperationMessage(project.id, `Store setup: started for ${domain}.`);
 
   const fallbackOrigin = process.env.NEXTJS_APP_BASE_URL?.trim() || process.env.APP_BASE_URL?.trim() || "http://localhost:3000";
   const existingRuntimeSecrets = await getProjectRuntimeSecrets(project.id);
@@ -325,98 +348,143 @@ export async function connectStoreToProject(params: {
   let detectedCustomerAuth = parsedRuntimeSecrets.shopify?.customerAuth;
 
   try {
+    stage = "detect_customer_auth";
+    await appendProjectOperationMessage(project.id, "Store setup: detecting customer auth capabilities...");
+
     detectedCustomerAuth = await detectCustomerAuthState({
       shopDomain: domain,
       accessToken: resolvedAccessToken,
       fallbackOrigin,
       current: parsedRuntimeSecrets.shopify?.customerAuth,
     });
+    await appendProjectOperationMessage(project.id, "Store setup: customer auth capabilities detected.");
   } catch {
     detectedCustomerAuth = parsedRuntimeSecrets.shopify?.customerAuth;
+    await appendProjectOperationMessage(
+      project.id,
+      "Store setup: customer auth detection failed, using previously known customer auth settings."
+    );
   }
-
-  const runtimeDatabasePatch = await buildRuntimeDatabaseSecretsPatch(project.id, existingRuntimeSecrets);
-
-  await upsertAndQueueProjectRuntimeSync({
-    projectId: project.id,
-    config: buildRuntimeConfigPatch(project, detectedCustomerAuth),
-    secrets: {
-      ...runtimeDatabasePatch,
-      shopify: {
-        shopDomain: domain,
-        adminAccessToken: resolvedAccessToken,
-        customerAuth: detectedCustomerAuth
-          ? {
-              ...detectedCustomerAuth,
-              sessions: undefined
-            }
-          : undefined
-      }
-    }
-  });
-
-  const now = new Date().toISOString();
-  const connected = await updateProject(project.id, (current) => {
-    return {
-      ...current,
-      updatedAt: now,
-      store: {
-        shopDomain: undefined,
-        connectedAt: now,
-        customerAuth: buildStoredCustomerAuthSummary(detectedCustomerAuth),
-      },
-      workspaceLayout: current.workspaceLayout ?? workspaceLayout,
-      messages: [...current.messages, createAssistantMessage(`Store connected: ${domain}. Applying Shopify baseline...`)]
-    };
-  });
-
-  if (!connected) {
-    throw new Error("Project not found");
-  }
-
-  const baselineInput = {
-    projectId: connected.id,
-    projectName: connected.name,
-    shopDomain: domain,
-    mobileAppDir: workspaceLayout.mobileAppDir,
-    expoBackendDir: workspaceLayout.expoBackendDir,
-    expoBackendPort: workspaceLayout.expoBackendPort,
-    brandColor: connected.preview.primaryColor
-  };
-
-  const baselineFiles = renderShopifyBaselineFiles(baselineInput);
-
-  validateShopifyBaselineFiles(baselineFiles, baselineInput);
-
-  const applied = await applyFilesToProjectRepo({
-    projectId: connected.id,
-    files: baselineFiles
-  });
-
-  const finalized = await updateProject(connected.id, (current) => ({
-    ...current,
-    updatedAt: new Date().toISOString(),
-    fileIndex: applied.fileIndex,
-    messages: [
-      ...current.messages,
-      createAssistantMessage(
-        `Store connected: ${domain}. Shopify baseline was applied to ${workspaceLayout.mobileAppDir}/ and ${workspaceLayout.expoBackendDir}/.`
-      )
-    ]
-  }));
-
-  const nextProject = finalized ?? connected;
 
   try {
-    await dispatchProjectRuntimeSync({
-      projectId: nextProject.id,
-      expoBackendBaseUrl: nextProject.devSession?.expoBackendUrl ?? nextProject.devSession?.backendUrl,
-    });
-  } catch {
-    // Runtime sync can be retried from dev-session refresh.
-  }
+    stage = "provision_runtime_database";
+    await appendProjectOperationMessage(project.id, "Store setup: ensuring per-project runtime database...");
 
-  return toPublicProject(nextProject);
+    const runtimeDatabasePatch = await buildRuntimeDatabaseSecretsPatch(project.id, existingRuntimeSecrets);
+    if (Object.keys(runtimeDatabasePatch).length > 0) {
+      await appendProjectOperationMessage(project.id, "Store setup: per-project runtime database provisioned.");
+    } else {
+      await appendProjectOperationMessage(project.id, "Store setup: per-project runtime database already available.");
+    }
+
+    stage = "sync_runtime_config";
+    await appendProjectOperationMessage(project.id, "Store setup: syncing runtime config and secrets...");
+
+    await upsertAndQueueProjectRuntimeSync({
+      projectId: project.id,
+      config: buildRuntimeConfigPatch(project, detectedCustomerAuth),
+      secrets: {
+        ...runtimeDatabasePatch,
+        shopify: {
+          shopDomain: domain,
+          adminAccessToken: resolvedAccessToken,
+          customerAuth: detectedCustomerAuth
+            ? {
+                ...detectedCustomerAuth,
+                sessions: undefined
+              }
+            : undefined
+        }
+      }
+    });
+
+    await appendProjectOperationMessage(project.id, "Store setup: runtime config and secrets synced.");
+
+    stage = "persist_store_connection";
+    await appendProjectOperationMessage(project.id, "Store setup: saving store connection metadata...");
+
+    const now = new Date().toISOString();
+    const connected = await updateProject(project.id, (current) => {
+      return {
+        ...current,
+        updatedAt: now,
+        store: {
+          shopDomain: undefined,
+          connectedAt: now,
+          customerAuth: buildStoredCustomerAuthSummary(detectedCustomerAuth),
+        },
+        workspaceLayout: current.workspaceLayout ?? workspaceLayout,
+        messages: [...current.messages, createAssistantMessage("Store setup: store metadata saved. Applying Shopify baseline...")]
+      };
+    });
+
+    if (!connected) {
+      throw new Error("Project not found");
+    }
+
+    stage = "generate_shopify_baseline";
+    await appendProjectOperationMessage(project.id, "Store setup: generating Shopify baseline files...");
+
+    const baselineInput = {
+      projectId: connected.id,
+      projectName: connected.name,
+      shopDomain: domain,
+      mobileAppDir: workspaceLayout.mobileAppDir,
+      expoBackendDir: workspaceLayout.expoBackendDir,
+      expoBackendPort: workspaceLayout.expoBackendPort,
+      brandColor: connected.preview.primaryColor
+    };
+
+    const baselineFiles = renderShopifyBaselineFiles(baselineInput);
+
+    validateShopifyBaselineFiles(baselineFiles, baselineInput);
+
+    stage = "apply_shopify_baseline";
+    await appendProjectOperationMessage(
+      project.id,
+      `Store setup: applying Shopify baseline to ${workspaceLayout.mobileAppDir}/ and ${workspaceLayout.expoBackendDir}/...`
+    );
+
+    const applied = await applyFilesToProjectRepo({
+      projectId: connected.id,
+      files: baselineFiles
+    });
+
+    const finalized = await updateProject(connected.id, (current) => ({
+      ...current,
+      updatedAt: new Date().toISOString(),
+      fileIndex: applied.fileIndex,
+      messages: [
+        ...current.messages,
+        createAssistantMessage(
+          `Store setup: Shopify baseline applied to ${workspaceLayout.mobileAppDir}/ and ${workspaceLayout.expoBackendDir}/.`
+        ),
+        createAssistantMessage(`Store connected: ${domain}. Runtime configuration synced and baseline applied.`)
+      ]
+    }));
+
+    const nextProject = finalized ?? connected;
+
+    stage = "dispatch_runtime_sync";
+    await appendProjectOperationMessage(project.id, "Store setup: dispatching runtime sync to active expo backend (if available)...");
+
+    try {
+      await dispatchProjectRuntimeSync({
+        projectId: nextProject.id,
+        expoBackendBaseUrl: nextProject.devSession?.expoBackendUrl ?? nextProject.devSession?.backendUrl,
+      });
+      await appendProjectOperationMessage(project.id, "Store setup: runtime sync dispatch completed.");
+    } catch {
+      await appendProjectOperationMessage(
+        project.id,
+        "Store setup: runtime sync dispatch skipped or failed. It can be retried from dev-session refresh."
+      );
+    }
+
+    return toPublicProject(nextProject);
+  } catch (error) {
+    return failStoreSetup(error);
+  }
 }
 
 export async function runPrompt(
