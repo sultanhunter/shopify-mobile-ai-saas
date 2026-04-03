@@ -1,61 +1,57 @@
 # Architecture Reference
 
-Last updated: 2026-03-28
-Version: v1.0.0
+Last updated: 2026-04-02
+Version: v2.0.0
 
-This document is the living reference for how the Shopify Mobile AI platform is wired today.
+This document reflects the runtime-owned architecture.
 
 ## 1) System Map
 
 ```text
-                                         +-------------------------+
-                                         |      Shopify Store      |
-                                         | (Admin + Customer side) |
-                                         +------------+------------+
-                                                      |
-                                     Admin OAuth + Admin API calls
-                                                      |
-+-----------------------------------------------------v--------------------------------------------------+
+                                        +-------------------------+
+                                        |      Shopify Store      |
+                                        | (Admin + Customer side) |
+                                        +------------+------------+
+                                                     ^
+                                                     |
+                                      Direct API/OAuth calls from runtime
+                                                     |
++----------------------------------------------------+---------------------------------------------------+
+|                                   Expo Backend (Runtime Plane)                                        |
+|                                                                                                        |
+|  - Receives config/secrets via /internal/runtime/sync                                                  |
+|  - Reads/writes per-project Postgres (Neon)                                                            |
+|  - Serves all app-facing APIs                                                                           |
+|    - /api/catalog                                                                                      |
+|    - /api/products/:handle                                                                             |
+|    - /api/customer-auth/*                                                                              |
++-------------------------------+-----------------------------------------------+------------------------+
+                                |                                               |
+                                |                                               |
+                          +-----v------+                                   +-----v----------------+
+                          |  Expo App  |                                   | Project DB (Neon PG) |
+                          |  mobile/   |                                   | one DB per project    |
+                          +------------+                                   +-----------------------+
+
+
++--------------------------------------------------------------------------------------------------------+
 |                                  Next.js SaaS (Control Plane)                                         |
 |                                                                                                        |
-|  - Workspace UI                                                                                        |
-|  - Shopify connect callback + token storage                                                            |
-|  - Control-plane APIs (/api/projects/:id/shopify/*)                                                    |
-|  - Dev session orchestration (calls runner)                                                            |
-+-----------------------------+---------------------------------------+-----------------------------------+
-                              |                                       |
-                              | RUNNER_SERVER_BASE_URL               | Supabase (projects/tasks)
-                              | RUNNER_SERVER_TOKEN                  |
-                              |                                       |
-+-----------------------------v---------------------------------------v-----------------------------------+
-|                                Runner Server (Execution Plane)                                         |
-|                                                                                                        |
-|  Project workspace root: /var/shopify-mobile/projects/<projectId>/repo                                |
-|                                                                                                        |
-|  repo/                                                                                                 |
-|    mobile/        -> Expo app                                                                          |
-|    expo-backend/  -> Node backend used by that Expo app                                                |
-|                                                                                                        |
-|  Dev session startup order:                                                                            |
-|    1) Start expo-backend and wait /api/health                                                          |
-|    2) Build session proxy URL: /api/shopify-mobile/dev-session/:sessionId/expo-backend                |
-|    3) Inject EXPO_PUBLIC_RUNTIME_BACKEND_URL into Expo process                                         |
-|    4) Start Expo                                                                                        |
-+-----------------------------+--------------------------------------------------------+-----------------+
-                              |                                                        |
-                              | exp:// QR                                              | injected backend URL
-                              |                                                        |
-                       +------v------+                                           +-----v------+
-                       |  Expo App   |------------------------------------------>| Expo-Backend|
-                       |  (mobile/)  |                  /api/*                  | (Node API) |
-                       +-------------+                                           +-----+------+
-                                                                                      |
-                                                                                      | CONTROL_PLANE_BASE_URL + PROJECT_ID
-                                                                                      v
-                                                                   Next.js SaaS /api/projects/:id/shopify/*
-                                                                                      |
-                                                                                      v
-                                                                                Shopify Admin API
+|  - Workspace UI + orchestration                                                                        |
+|  - Shopify connect callbacks                                                                            |
+|  - Runtime config/secrets source of truth                                                               |
+|  - Runtime sync outbox + dispatcher                                                                     |
++-----------------------------------+----------------------------------------------+-------------------+
+                                    |                                              |
+                                    | RUNNER_SERVER_*                              | Supabase
+                                    |                                              |
+                         +----------v-----------+                       +----------v--------------------+
+                         | Runner Server        |                       | Control-plane Tables          |
+                         | (execution plane)    |                       | - projects/tasks              |
+                         | starts mobile+backend|                       | - project_runtime_config      |
+                         | injects backend URL  |                       | - project_runtime_secrets     |
+                         +----------------------+                       | - runtime_sync_outbox         |
+                                                                        +-------------------------------+
 ```
 
 ## 2) Core Flows
@@ -63,43 +59,48 @@ This document is the living reference for how the Shopify Mobile AI platform is 
 ### 2.1 Workspace Create (GitHub-first)
 
 1. SaaS requests runner task `workspace.create`.
-2. Runner scaffolds `mobile/` and `expo-backend/` locally.
-3. Runner creates GitHub repo and pushes initial commit.
-4. Runner persists project row in Supabase with `github.repoUrl`.
-5. If GitHub init fails and `RUNNER_REQUIRE_GITHUB_REPO=true`, task fails.
+2. Runner scaffolds `mobile/` and `expo-backend/`.
+3. Runner creates/pushes GitHub repo.
+4. Project metadata is stored in Supabase `projects`.
 
-### 2.2 Shopify Store Connect
+### 2.2 Shopify Connect + Runtime Provisioning
 
-1. SaaS starts Shopify OAuth.
-2. Shopify callback exchanges token.
-3. SaaS stores `store.shopDomain` + `store.accessTokenEncrypted`.
-4. SaaS applies Shopify baseline files into repo (`mobile/` + `expo-backend/`).
+1. SaaS completes Shopify OAuth and receives admin token.
+2. SaaS provisions Neon per-project runtime DB (if missing).
+3. SaaS runs runtime DB migrations (`runtime_sync_state`, `customer_auth_sessions`).
+4. SaaS writes:
+   - non-secret runtime config -> `project_runtime_config`
+   - encrypted runtime secrets JSON -> `project_runtime_secrets`
+5. SaaS appends versioned sync event to `runtime_sync_outbox`.
 
-### 2.3 Dev Session Start
+### 2.3 Runtime Sync Dispatch
 
-1. SaaS calls runner `/dev-session/start` with `projectId`, `repoUrl`, workspace dirs, and `controlPlaneBaseUrl`.
-2. Runner starts expo-backend first and checks `/api/health`.
-3. Runner injects `EXPO_PUBLIC_RUNTIME_BACKEND_URL` into Expo process.
-4. SaaS polls status and displays Expo URL and expo-backend URL.
+1. On connect/config updates, event is queued in outbox.
+2. On dev-session start/refresh (backend URL available), SaaS dispatches latest payload to:
+   - `POST /internal/runtime/sync`
+3. Runtime persists synced config+secrets locally and acknowledges version.
+4. SaaS marks outbox events `delivered` or `failed`.
 
-### 2.4 Product Fetch (Runtime)
+### 2.4 App API Path (Hot Path)
 
-1. Expo app calls `EXPO_PUBLIC_RUNTIME_BACKEND_URL/api/catalog`.
-2. Expo-backend calls SaaS: `/api/projects/:projectId/shopify/catalog`.
-3. SaaS reads encrypted token from Supabase, decrypts, calls Shopify Admin API.
-4. Response returns back through expo-backend to Expo app.
+1. Expo app calls runtime backend URL (`EXPO_PUBLIC_RUNTIME_BACKEND_URL`).
+2. Runtime backend uses synced secrets + per-project DB to serve requests.
+3. Runtime backend calls Shopify directly (no SaaS proxy in hot path).
 
-### 2.5 Customer Auth (Runtime)
+## 3) Data Ownership
 
-- `shopify_hosted`: app opens Shopify hosted account/login URL.
-- `customer_account_api`: app starts OAuth via expo-backend -> SaaS customer-auth endpoints.
+- `projects.project`: non-secret project/workspace metadata only.
+- `project_runtime_config`: non-secret runtime config, versioned.
+- `project_runtime_secrets`: encrypted JSON for per-project sensitive values.
+- `runtime_sync_outbox`: versioned sync queue + delivery status.
 
-## 3) Source of Truth
+Project secrets include (stored only in encrypted runtime secrets):
 
-- Project state: Supabase `projects` table (JSON `project` field).
-- Tasks: Supabase `tasks` table.
-- Repo code: GitHub repo + runner local clone.
-- Shopify credentials: encrypted in project row (`accessTokenEncrypted`).
+- Shopify admin access token
+- Shopify shop domain
+- Customer Account API client ID + endpoints/scopes
+- Runtime DB credentials
+- Other runtime integration secrets (for example webhook shared secrets)
 
 ## 4) Required Environment Variables
 
@@ -110,42 +111,40 @@ This document is the living reference for how the Shopify Mobile AI platform is 
 - `RUNNER_SERVER_TOKEN`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_PROJECTS_TABLE`
+- `SUPABASE_TASKS_TABLE`
+- `SUPABASE_RUNTIME_CONFIG_TABLE`
+- `SUPABASE_RUNTIME_SECRETS_TABLE`
+- `SUPABASE_RUNTIME_SYNC_OUTBOX_TABLE`
 - `SHOPIFY_API_KEY`
 - `SHOPIFY_API_SECRET`
 - `SHOPIFY_TOKEN_ENCRYPTION_SECRET`
 - `SHOPIFY_OAUTH_STATE_SECRET`
+- `NEON_ADMIN_DATABASE_URL`
+- `NEON_RUNTIME_DATABASE_PREFIX` (optional)
+- `NEON_RUNTIME_ROLE_PREFIX` (optional)
+- `RUNTIME_SYNC_TOKEN` (recommended)
 
 ### Runner
 
-- `RUNNER_SERVER_TOKEN`
 - `RUNNER_SERVER_BASE_URL`
+- `RUNNER_SERVER_TOKEN`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `GITHUB_TOKEN` (or `SHOPIFY_MOBILE_GITHUB_TOKEN`)
+- `GITHUB_TOKEN`
 - `RUNNER_REQUIRE_GITHUB_REPO=true`
 
 ## 5) Operational Notes
 
-- API routes that return project/shopify runtime data are forced dynamic to avoid stale cache.
-- Expo backend URL is session-scoped and injected by runner.
-- Single repo contains both apps (`mobile/` + `expo-backend/`) by design.
+- Runtime sync is best-effort per dispatch; failed outbox events are retried on next refresh.
+- Runtime backend URL is session-scoped and injected by runner.
+- Runtime backend should be considered the app API boundary for mobile clients.
 
 ## 6) Version History
 
-### v1.0.0 (2026-03-28)
+### v2.0.0 (2026-04-02)
 
-- Introduced dual-app workspace layout (`mobile/` + `expo-backend/`).
-- Added runner-managed expo-backend startup and URL injection to Expo.
-- Added Shopify customer auth support (hosted + customer account API).
-- Enforced GitHub-first workspace initialization path.
-- Forced dynamic API behavior for project/shopify runtime routes.
-
-## 7) Update Checklist (for future changes)
-
-When architecture changes, update all of these:
-
-1. System map section.
-2. Flow section(s) affected.
-3. Env vars section.
-4. Version history with date + bullet changes.
-5. Any renamed routes/fields (`projectId`, URL injection env, workspace dirs).
+- Switched to runtime-owned app API path (`Expo app -> expo-backend -> Shopify + project DB`).
+- Added per-project Neon DB provisioning and migration flow.
+- Replaced runtime state/events control-plane schema with config/secrets/outbox model.
+- Added encrypted secrets source of truth outside `projects.project`.

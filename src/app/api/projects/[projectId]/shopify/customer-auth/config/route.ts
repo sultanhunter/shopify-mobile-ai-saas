@@ -1,12 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getProject, updateProject } from "@/lib/db";
 import { detectCustomerAuthState, getCustomerApiScopes } from "@/lib/shopify-customer-auth";
-import { decryptSecret } from "@/lib/secret-crypto";
+import {
+  dispatchProjectRuntimeSync,
+  getProjectRuntimeSecrets,
+  upsertAndQueueProjectRuntimeSync
+} from "@/lib/runtime-sync";
+import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+
+const CLIENT_ID_CONFIGURED_SENTINEL = "__configured__";
 
 interface Params {
   params: {
@@ -27,6 +34,52 @@ function shouldRefreshDetection(detectedAt: string | undefined): boolean {
   return Date.now() - detectedAtMs > 6 * 60 * 60 * 1000;
 }
 
+function buildRuntimeConfigPatch(params: {
+  projectId: string;
+  projectName: string;
+  brandColor: string;
+  customerAuth: Awaited<ReturnType<typeof detectCustomerAuthState>>;
+}): Record<string, unknown> {
+  return {
+    projectId: params.projectId,
+    projectName: params.projectName,
+    brandColor: params.brandColor,
+    customerAuth: {
+      detectedAt: params.customerAuth.detectedAt,
+      activeMethod: params.customerAuth.activeMethod,
+      recommendedMethod: params.customerAuth.recommendedMethod,
+      supportedMethods: params.customerAuth.supportedMethods,
+      hosted: params.customerAuth.hosted,
+      customerAccountApi: {
+        enabled: params.customerAuth.customerAccountApi.enabled,
+        hasClientId: Boolean(params.customerAuth.customerAccountApi.clientId)
+      }
+    },
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function buildProjectStoreCustomerAuthSummary(auth: Awaited<ReturnType<typeof detectCustomerAuthState>>) {
+  return {
+    detectedAt: auth.detectedAt,
+    activeMethod: auth.activeMethod,
+    recommendedMethod: auth.recommendedMethod,
+    supportedMethods: auth.supportedMethods,
+    hosted: auth.hosted,
+    customerAccountApi: {
+      enabled: auth.customerAccountApi.enabled,
+      clientId: auth.customerAccountApi.clientId ? CLIENT_ID_CONFIGURED_SENTINEL : undefined,
+      scopes: [],
+      issuer: undefined,
+      authorizationEndpoint: undefined,
+      tokenEndpoint: undefined,
+      revocationEndpoint: undefined,
+      endSessionEndpoint: undefined,
+      callbackUrl: undefined
+    }
+  };
+}
+
 export async function GET(request: NextRequest, { params }: Params) {
   try {
     const project = await getProject(params.projectId);
@@ -34,18 +87,17 @@ export async function GET(request: NextRequest, { params }: Params) {
       return NextResponse.json({ error: "Project not found." }, { status: 404 });
     }
 
-    const shopDomain = project.store?.shopDomain?.trim().toLowerCase();
+    const runtimeSecrets = await getProjectRuntimeSecrets(project.id);
+    const parsed = parseRuntimeSecrets(runtimeSecrets);
+    const shopDomain = parsed.shopify?.shopDomain?.trim().toLowerCase();
+    const accessToken = parsed.shopify?.adminAccessToken;
+    let authState = parsed.shopify?.customerAuth;
+
     if (!shopDomain) {
       return NextResponse.json({ error: "Shopify store is not connected." }, { status: 400 });
     }
 
-    const accessTokenEncrypted = project.store?.accessTokenEncrypted;
-    const accessToken = accessTokenEncrypted
-      ? decryptSecret(accessTokenEncrypted)
-      : project.store?.accessToken;
-
-    let authState = project.store?.customerAuth;
-    if (shouldRefreshDetection(authState?.detectedAt) && accessToken) {
+    if (authState && shouldRefreshDetection(authState.detectedAt) && accessToken) {
       const refreshed = await detectCustomerAuthState({
         shopDomain,
         accessToken,
@@ -54,16 +106,23 @@ export async function GET(request: NextRequest, { params }: Params) {
       });
 
       authState = refreshed;
-      await updateProject(project.id, (current) => ({
-        ...current,
-        updatedAt: new Date().toISOString(),
-        store: current.store
-          ? {
-              ...current.store,
-              customerAuth: refreshed,
+      await upsertAndQueueProjectRuntimeSync({
+        projectId: project.id,
+        config: buildRuntimeConfigPatch({
+          projectId: project.id,
+          projectName: project.name,
+          brandColor: project.preview.primaryColor,
+          customerAuth: refreshed
+        }),
+        secrets: {
+          shopify: {
+            customerAuth: {
+              ...refreshed,
+              sessions: undefined
             }
-          : current.store,
-      }));
+          }
+        }
+      });
     }
 
     if (!authState) {
@@ -119,17 +178,18 @@ export async function POST(request: NextRequest, { params }: Params) {
     }
 
     const project = await getProject(params.projectId);
-    if (!project?.store) {
+    if (!project) {
+      return NextResponse.json({ error: "Project not found." }, { status: 404 });
+    }
+
+    const runtimeSecrets = await getProjectRuntimeSecrets(project.id);
+    const parsed = parseRuntimeSecrets(runtimeSecrets);
+
+    const shopDomain = parsed.shopify?.shopDomain?.trim().toLowerCase();
+    const accessToken = parsed.shopify?.adminAccessToken;
+    if (!shopDomain || !accessToken) {
       return NextResponse.json({ error: "Shopify store is not connected for this project." }, { status: 404 });
     }
-
-    const shopDomain = project.store.shopDomain?.trim().toLowerCase();
-    if (!shopDomain) {
-      return NextResponse.json({ error: "Shopify store domain is missing on this project." }, { status: 409 });
-    }
-
-    const accessTokenEncrypted = project.store.accessTokenEncrypted;
-    const accessToken = accessTokenEncrypted ? decryptSecret(accessTokenEncrypted) : project.store.accessToken;
 
     const normalizedClientId = hasClientIdUpdate
       ? typeof payload.customerAccountClientId === "string"
@@ -141,12 +201,14 @@ export async function POST(request: NextRequest, { params }: Params) {
       return NextResponse.json({ error: "customerAccountClientId cannot be empty." }, { status: 400 });
     }
 
-    const currentAuthState = project.store.customerAuth
+    const currentAuthState = parsed.shopify?.customerAuth
       ? {
-          ...project.store.customerAuth,
+          ...parsed.shopify.customerAuth,
           customerAccountApi: {
-            ...project.store.customerAuth.customerAccountApi,
-            clientId: hasClientIdUpdate ? normalizedClientId : project.store.customerAuth.customerAccountApi.clientId,
+            ...parsed.shopify.customerAuth.customerAccountApi,
+            clientId: hasClientIdUpdate
+              ? normalizedClientId
+              : parsed.shopify.customerAuth.customerAccountApi.clientId,
           },
         }
       : hasClientIdUpdate
@@ -166,6 +228,7 @@ export async function POST(request: NextRequest, { params }: Params) {
               clientId: normalizedClientId,
               scopes: getCustomerApiScopes(),
             },
+            sessions: undefined,
           }
         : undefined;
 
@@ -185,31 +248,56 @@ export async function POST(request: NextRequest, { params }: Params) {
       );
     }
 
+    const nextAuth = {
+      ...detected,
+      activeMethod: payload.activeMethod ?? detected.activeMethod,
+      sessions: undefined,
+    };
+
+    await upsertAndQueueProjectRuntimeSync({
+      projectId: project.id,
+      config: buildRuntimeConfigPatch({
+        projectId: project.id,
+        projectName: project.name,
+        brandColor: project.preview.primaryColor,
+        customerAuth: nextAuth
+      }),
+      secrets: {
+        shopify: {
+          customerAuth: nextAuth
+        }
+      }
+    });
+
     const updated = await updateProject(project.id, (current) => {
       const now = new Date().toISOString();
-      const nextCustomerAuth = {
-        ...detected,
-        activeMethod: payload.activeMethod ?? detected.activeMethod,
-      };
 
       return {
         ...current,
         updatedAt: now,
-        store: current.store
-          ? {
-              ...current.store,
-              customerAuth: nextCustomerAuth,
-            }
-          : current.store,
+        store: {
+          shopDomain: undefined,
+          connectedAt: current.store?.connectedAt ?? now,
+          customerAuth: buildProjectStoreCustomerAuthSummary(nextAuth),
+        },
       };
     });
+
+    try {
+      await dispatchProjectRuntimeSync({
+        projectId: project.id,
+        expoBackendBaseUrl: updated?.devSession?.expoBackendUrl ?? updated?.devSession?.backendUrl,
+      });
+    } catch {
+      // Best effort sync; pending outbox retries on next dev-session refresh.
+    }
 
     return NextResponse.json({
       auth: {
         activeMethod: updated?.store?.customerAuth?.activeMethod ?? payload.activeMethod,
         customerAccountApi: {
-          hasClientId: Boolean(updated?.store?.customerAuth?.customerAccountApi.clientId),
-          enabled: Boolean(updated?.store?.customerAuth?.customerAccountApi.enabled),
+          hasClientId: Boolean(nextAuth.customerAccountApi.clientId),
+          enabled: Boolean(nextAuth.customerAccountApi.enabled),
         },
       },
     });

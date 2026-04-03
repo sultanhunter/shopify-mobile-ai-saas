@@ -2,7 +2,6 @@ interface ShopifyBaselineInput {
   projectId: string;
   projectName: string;
   shopDomain: string;
-  controlPlaneBaseUrl: string;
   mobileAppDir: string;
   expoBackendDir?: string;
   expoBackendPort?: number;
@@ -565,7 +564,6 @@ export const storeConfig = {
   projectId: ${JSON.stringify(input.projectId)},
   projectName: ${JSON.stringify(input.projectName)},
   shopDomain: ${JSON.stringify(input.shopDomain)},
-  controlPlaneBaseUrl: ${JSON.stringify(input.controlPlaneBaseUrl)},
   expoBackendBaseUrl: injectedExpoBackendBaseUrl,
   runtimeBackendBaseUrl: injectedExpoBackendBaseUrl,
   brandColor: ${JSON.stringify(input.brandColor)}
@@ -643,7 +641,8 @@ function renderRuntimeBackendPackageJson(): string {
       dependencies: {
         cors: "^2.8.5",
         dotenv: "^16.4.5",
-        express: "^4.19.2"
+        express: "^4.19.2",
+        pg: "^8.13.1"
       }
     },
     null,
@@ -660,11 +659,9 @@ function renderRuntimeBackendGitIgnore(): string {
 function renderRuntimeBackendEnvExample(input: ShopifyBaselineInput): string {
   return `PORT=${resolveExpoBackendPort(input)}
 PROJECT_ID=${input.projectId}
-CONTROL_PLANE_BASE_URL=${input.controlPlaneBaseUrl}
+DATABASE_URL=
 API_TIMEOUT_MS=15000
-
-# Optional shared secret to call control-plane APIs
-BACKEND_AUTH_TOKEN=
+RUNTIME_SYNC_TOKEN=
 `;
 }
 
@@ -677,7 +674,7 @@ This backend powers the generated Expo storefront app for project \`${input.proj
 
 - Exposes mobile-friendly API endpoints for catalog and customer auth
 - Keeps backend logic in the workspace instead of the SaaS frontend server
-- Uses adapter modules so auth implementations can be swapped later
+- Uses runtime sync to receive project config/secrets from control-plane
 
 ## Start locally
 
@@ -711,6 +708,7 @@ The API starts on \`http://localhost:4100\` by default.
 - \`POST /api/customer-auth/start\`
 - \`GET /api/customer-auth/session/:sessionId\`
 - \`POST /api/customer-auth/refresh\`
+- \`POST /internal/runtime/sync\`
 `;
 }
 
@@ -720,7 +718,6 @@ function renderRuntimeBackendConfig(input: ShopifyBaselineInput): string {
 dotenv.config();
 
 const DEFAULT_PROJECT_ID = ${JSON.stringify(input.projectId)};
-const DEFAULT_CONTROL_PLANE_BASE_URL = ${JSON.stringify(input.controlPlaneBaseUrl)};
 const DEFAULT_PORT = ${resolveExpoBackendPort(input)};
 const DEFAULT_TIMEOUT_MS = 15000;
 
@@ -741,117 +738,312 @@ function asNumber(value, fallback) {
 export const runtimeConfig = {
   port: asNumber(process.env.PORT, DEFAULT_PORT),
   projectId: asString(process.env.PROJECT_ID, DEFAULT_PROJECT_ID),
-  controlPlaneBaseUrl: asString(process.env.CONTROL_PLANE_BASE_URL, DEFAULT_CONTROL_PLANE_BASE_URL).replace(/\\/$/, ""),
+  databaseUrl: process.env.DATABASE_URL?.trim() || undefined,
   timeoutMs: asNumber(process.env.API_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
-  backendAuthToken: process.env.BACKEND_AUTH_TOKEN?.trim() || undefined
+  runtimeSyncToken: process.env.RUNTIME_SYNC_TOKEN?.trim() || undefined,
 };
 
 if (!runtimeConfig.projectId) {
   throw new Error("PROJECT_ID is required for expo backend.");
 }
-
-if (!runtimeConfig.controlPlaneBaseUrl || !/^https?:\\/\\//.test(runtimeConfig.controlPlaneBaseUrl)) {
-  throw new Error("CONTROL_PLANE_BASE_URL must be a valid http(s) URL.");
-}
 `;
 }
 
-function renderRuntimeBackendHttpClient(): string {
-  return `export async function requestJson(url, options = {}) {
-  const timeoutMs = options.timeoutMs ?? 15000;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+function renderRuntimeBackendRuntimeStateStore(): string {
+  return `import { Pool } from "pg";
 
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal
-    });
+const STATE_ROW_ID = "runtime";
 
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) {
-      const message = payload && typeof payload === "object" && "error" in payload
-        ? payload.error
-        : "Request failed with status " + response.status;
-      throw new Error(typeof message === "string" ? message : "Request failed");
-    }
+let memoryState = {
+  version: 0,
+  config: {},
+  secrets: {}
+};
 
-    return payload;
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("Request timed out after " + Math.round(timeoutMs / 1000) + "s");
-    }
+let pool;
+let poolDatabaseUrl;
 
-    throw error;
-  } finally {
-    clearTimeout(timer);
+function resolveRuntimeStateDatabaseUrl(config, candidateState) {
+  const fromConfig = typeof config?.databaseUrl === "string" ? config.databaseUrl.trim() : "";
+  if (fromConfig) {
+    return fromConfig;
   }
+
+  const fromCandidate =
+    typeof candidateState?.secrets?.runtime?.database?.databaseUrl === "string"
+      ? candidateState.secrets.runtime.database.databaseUrl.trim()
+      : "";
+  if (fromCandidate) {
+    return fromCandidate;
+  }
+
+  const fromMemory =
+    typeof memoryState?.secrets?.runtime?.database?.databaseUrl === "string"
+      ? memoryState.secrets.runtime.database.databaseUrl.trim()
+      : "";
+
+  return fromMemory || undefined;
 }
-`;
+
+function createPool(databaseUrl) {
+  return new Pool({
+    connectionString: databaseUrl,
+    max: 2,
+    ssl: databaseUrl.includes("localhost") ? undefined : { rejectUnauthorized: false }
+  });
 }
 
-function renderRuntimeBackendControlPlaneClient(): string {
-  return `import { requestJson } from "./http-client.js";
+function getPool(config, candidateState) {
+  const databaseUrl = resolveRuntimeStateDatabaseUrl(config, candidateState);
+  if (!databaseUrl) {
+    return undefined;
+  }
 
-export function createControlPlaneClient(config) {
-  const base = config.controlPlaneBaseUrl.replace(/\\/$/, "");
+  if (!pool || poolDatabaseUrl !== databaseUrl) {
+    if (pool) {
+      void pool.end().catch(() => null);
+    }
 
-  function request(path, options = {}) {
-    const headers = {
-      Accept: "application/json",
-      ...(options.headers || {})
+    pool = createPool(databaseUrl);
+    poolDatabaseUrl = databaseUrl;
+  }
+
+  return pool;
+}
+
+async function ensureSchema(currentPool) {
+  await currentPool.query(
+    "create table if not exists runtime_sync_state (id text primary key, version bigint not null default 0, config_json jsonb not null default '{}'::jsonb, secrets_json jsonb not null default '{}'::jsonb, updated_at timestamptz not null default now())"
+  );
+}
+
+export async function initRuntimeStateStore(config) {
+  const currentPool = getPool(config, memoryState);
+  if (!currentPool) {
+    return;
+  }
+
+  await ensureSchema(currentPool);
+}
+
+export async function getRuntimeState(config) {
+  const currentPool = getPool(config, memoryState);
+  if (!currentPool) {
+    return memoryState;
+  }
+
+  await ensureSchema(currentPool);
+  const result = await currentPool.query(
+    "select id, version, config_json, secrets_json from runtime_sync_state where id = $1 limit 1",
+    [STATE_ROW_ID]
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    await currentPool.query(
+      "insert into runtime_sync_state (id, version, config_json, secrets_json) values ($1, 0, '{}'::jsonb, '{}'::jsonb)",
+      [STATE_ROW_ID]
+    );
+
+    return {
+      version: 0,
+      config: {},
+      secrets: {}
     };
-
-    if (config.backendAuthToken) {
-      headers.Authorization = "Bearer " + config.backendAuthToken;
-    }
-
-    return requestJson(base + path, {
-      ...options,
-      headers,
-      timeoutMs: config.timeoutMs
-    });
   }
-
-  const projectPath = "/api/projects/" + encodeURIComponent(config.projectId);
 
   return {
-    fetchCatalog: () => request(projectPath + "/shopify/catalog", { method: "GET" }),
-    fetchProductByHandle: (handle) =>
-      request(projectPath + "/shopify/products/" + encodeURIComponent(handle), { method: "GET" }),
-    fetchCustomerAuthConfig: () => request(projectPath + "/shopify/customer-auth/config", { method: "GET" }),
-    setActiveCustomerAuthMethod: (activeMethod) =>
-      request(projectPath + "/shopify/customer-auth/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ activeMethod })
-      }),
-    startCustomerAuth: () => request(projectPath + "/shopify/customer-auth/start", { method: "POST" }),
-    fetchCustomerAuthSession: (sessionId) =>
-      request(projectPath + "/shopify/customer-auth/session/" + encodeURIComponent(sessionId), { method: "GET" }),
-    refreshCustomerAuth: (refreshToken) =>
-      request(projectPath + "/shopify/customer-auth/refresh", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refreshToken })
-      })
+    version: Number(row.version ?? 0),
+    config: row.config_json ?? {},
+    secrets: row.secrets_json ?? {}
   };
+}
+
+export async function saveRuntimeState(config, nextState) {
+  const normalized = {
+    version: Number(nextState.version ?? 0),
+    config: nextState.config ?? {},
+    secrets: nextState.secrets ?? {}
+  };
+
+  const currentPool = getPool(config, normalized);
+  if (!currentPool) {
+    if (normalized.version < memoryState.version) {
+      return memoryState;
+    }
+
+    memoryState = normalized;
+    return memoryState;
+  }
+
+  await ensureSchema(currentPool);
+  const current = await getRuntimeState(config);
+  if (normalized.version < current.version) {
+    return current;
+  }
+
+  await currentPool.query(
+    "insert into runtime_sync_state (id, version, config_json, secrets_json) values ($1, $2, $3::jsonb, $4::jsonb) on conflict (id) do update set version = excluded.version, config_json = excluded.config_json, secrets_json = excluded.secrets_json, updated_at = now()",
+    [STATE_ROW_ID, normalized.version, JSON.stringify(normalized.config), JSON.stringify(normalized.secrets)]
+  );
+
+  return normalized;
+}
+`;
+}
+
+function renderRuntimeBackendShopifyAdminClient(): string {
+  return `const SHOPIFY_ADMIN_API_VERSION = "2024-10";
+
+function asMoney(value) {
+  const parsed = Number(value ?? "0");
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+
+  return Math.round(parsed * 100) / 100;
+}
+
+function stripHtml(value) {
+  if (!value) return undefined;
+  return String(value).replace(/<[^>]*>/g, " ").replace(/\\s+/g, " ").trim();
+}
+
+function mapProductSummary(raw) {
+  const firstVariant = Array.isArray(raw?.variants) ? raw.variants[0] : undefined;
+  if (!raw?.id || !raw?.title || !raw?.handle || !firstVariant?.id) {
+    return null;
+  }
+
+  const imageUrl = raw?.image?.src || (Array.isArray(raw?.images) ? raw.images[0]?.src : undefined);
+  return {
+    id: String(raw.id),
+    title: String(raw.title),
+    handle: String(raw.handle),
+    imageUrl,
+    price: asMoney(firstVariant.price),
+    variantId: String(firstVariant.id)
+  };
+}
+
+function mapProductDetail(raw) {
+  const summary = mapProductSummary(raw);
+  if (!summary) {
+    return null;
+  }
+
+  return {
+    ...summary,
+    description: stripHtml(raw.body_html)
+  };
+}
+
+async function shopifyAdminFetch(params) {
+  const search = new URLSearchParams(params.query || {});
+  const response = await fetch(
+    "https://" + params.shopDomain + "/admin/api/" + SHOPIFY_ADMIN_API_VERSION + "/" + params.resourcePath + "?" + search.toString(),
+    {
+      method: "GET",
+      headers: {
+        "X-Shopify-Access-Token": params.accessToken,
+        Accept: "application/json"
+      },
+      cache: "no-store"
+    }
+  );
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload) {
+    throw new Error("Shopify API request failed with status " + response.status);
+  }
+
+  return payload;
+}
+
+export async function fetchShopifyCatalog(params) {
+  const payload = await shopifyAdminFetch({
+    shopDomain: params.shopDomain,
+    accessToken: params.accessToken,
+    resourcePath: "products.json",
+    query: {
+      limit: String(params.limit ?? 24),
+      fields: "id,title,handle,image,images,variants"
+    }
+  });
+
+  return (Array.isArray(payload?.products) ? payload.products : [])
+    .map((product) => mapProductSummary(product))
+    .filter(Boolean);
+}
+
+export async function fetchShopifyProductByHandle(params) {
+  const payload = await shopifyAdminFetch({
+    shopDomain: params.shopDomain,
+    accessToken: params.accessToken,
+    resourcePath: "products.json",
+    query: {
+      handle: params.handle,
+      limit: "1",
+      fields: "id,title,handle,body_html,image,images,variants"
+    }
+  });
+
+  const found = Array.isArray(payload?.products) ? payload.products[0] : undefined;
+  if (!found) {
+    return null;
+  }
+
+  return mapProductDetail(found);
 }
 `;
 }
 
 function renderRuntimeBackendCatalogAdapter(): string {
-  return `export function createCatalogAdapter(controlPlaneClient) {
+  return `import { getRuntimeState } from "../lib/runtime-state-store.js";
+import { fetchShopifyCatalog, fetchShopifyProductByHandle } from "../lib/shopify-admin-client.js";
+
+function readShopifySecrets(runtimeState) {
+  const shopify = runtimeState?.secrets?.shopify;
+  const shopDomain = typeof shopify?.shopDomain === "string" ? shopify.shopDomain.trim().toLowerCase() : "";
+  const accessToken = typeof shopify?.adminAccessToken === "string" ? shopify.adminAccessToken.trim() : "";
+
+  if (!shopDomain || !accessToken) {
+    throw new Error("Shopify runtime secrets are missing. Connect store in SaaS and run runtime sync.");
+  }
+
+  return { shopDomain, accessToken };
+}
+
+export function createCatalogAdapter(config) {
   return {
     async getCatalog() {
-      const payload = await controlPlaneClient.fetchCatalog();
+      const runtimeState = await getRuntimeState(config);
+      const shopify = readShopifySecrets(runtimeState);
+      const products = await fetchShopifyCatalog({
+        shopDomain: shopify.shopDomain,
+        accessToken: shopify.accessToken,
+        limit: 24
+      });
+
       return {
-        shopDomain: typeof payload?.shopDomain === "string" ? payload.shopDomain : undefined,
-        products: Array.isArray(payload?.products) ? payload.products : []
+        shopDomain: shopify.shopDomain,
+        products
       };
     },
     async getProductByHandle(handle) {
-      return controlPlaneClient.fetchProductByHandle(handle);
+      const runtimeState = await getRuntimeState(config);
+      const shopify = readShopifySecrets(runtimeState);
+      const product = await fetchShopifyProductByHandle({
+        shopDomain: shopify.shopDomain,
+        accessToken: shopify.accessToken,
+        handle
+      });
+
+      if (!product) {
+        return { error: "Product not found." };
+      }
+
+      return { product };
     }
   };
 }
@@ -859,39 +1051,441 @@ function renderRuntimeBackendCatalogAdapter(): string {
 }
 
 function renderRuntimeBackendCustomerAuthAdapter(): string {
-  return `function normalizeConfig(payload) {
-  const auth = payload && typeof payload === "object" && "auth" in payload ? payload.auth : null;
-  if (!auth || typeof auth !== "object") {
-    throw new Error("Invalid customer auth payload from control plane.");
+  return `import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { Pool } from "pg";
+import { getRuntimeState, saveRuntimeState } from "../lib/runtime-state-store.js";
+
+const FALLBACK_METHOD = "shopify_hosted";
+const SESSION_TTL_MS = 10 * 60 * 1000;
+
+let runtimePool;
+let runtimePoolDatabaseUrl;
+let runtimeSchemaReady = false;
+
+function asRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
   }
 
-  return {
-    ...auth,
-    endpoints: {
-      start: "/api/customer-auth/start",
-      sessionBase: "/api/customer-auth/session",
-      refresh: "/api/customer-auth/refresh"
+  return value;
+}
+
+function normalizeScopes(scopes) {
+  if (!Array.isArray(scopes)) {
+    return [];
+  }
+
+  return scopes
+    .map((scope) => (typeof scope === "string" ? scope.trim() : ""))
+    .filter((scope) => scope.length > 0);
+}
+
+function createPool(databaseUrl) {
+  return new Pool({
+    connectionString: databaseUrl,
+    max: 4,
+    ssl: databaseUrl.includes("localhost") ? undefined : { rejectUnauthorized: false }
+  });
+}
+
+function getRuntimeDatabaseUrl(runtimeState) {
+  const runtimeSecrets = asRecord(runtimeState?.secrets);
+  const runtime = asRecord(runtimeSecrets.runtime);
+  const database = asRecord(runtime.database);
+  const databaseUrl = typeof database.databaseUrl === "string" ? database.databaseUrl.trim() : "";
+
+  if (!databaseUrl) {
+    throw new Error("Runtime database URL is missing. Wait for control-plane runtime sync.");
+  }
+
+  return databaseUrl;
+}
+
+async function getRuntimePool(runtimeState) {
+  const databaseUrl = getRuntimeDatabaseUrl(runtimeState);
+
+  if (!runtimePool || runtimePoolDatabaseUrl !== databaseUrl) {
+    if (runtimePool) {
+      await runtimePool.end().catch(() => null);
     }
+
+    runtimePool = createPool(databaseUrl);
+    runtimePoolDatabaseUrl = databaseUrl;
+    runtimeSchemaReady = false;
+  }
+
+  if (!runtimeSchemaReady) {
+    await runtimePool.query(
+      "create table if not exists customer_auth_sessions (id text primary key, status text not null, code_verifier text, token_payload_encrypted text, error text, expires_at timestamptz not null, created_at timestamptz not null default now(), updated_at timestamptz not null default now())"
+    );
+
+    await runtimePool.query(
+      "create index if not exists customer_auth_sessions_status_updated_at_idx on customer_auth_sessions (status, updated_at desc)"
+    );
+
+    runtimeSchemaReady = true;
+  }
+
+  return runtimePool;
+}
+
+function getShopifySecrets(runtimeState) {
+  const shopify = asRecord(asRecord(runtimeState?.secrets).shopify);
+  const shopDomain = typeof shopify.shopDomain === "string" ? shopify.shopDomain.trim().toLowerCase() : "";
+  const customerAuth = asRecord(shopify.customerAuth);
+
+  return {
+    shopDomain,
+    customerAuth,
+    hosted: asRecord(customerAuth.hosted),
+    customerAccountApi: asRecord(customerAuth.customerAccountApi)
   };
 }
 
-export function createCustomerAuthAdapter(controlPlaneClient) {
+function createPkcePair() {
+  const codeVerifier = randomBytes(48).toString("base64url");
+  const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
+
+  return { codeVerifier, codeChallenge };
+}
+
+function createUnsignedState(params) {
+  return Buffer.from(
+    JSON.stringify({
+      projectId: params.projectId,
+      shopDomain: params.shopDomain,
+      sessionId: params.sessionId,
+      nonce: randomBytes(10).toString("base64url"),
+      expiresAt: Date.now() + SESSION_TTL_MS
+    }),
+    "utf8"
+  ).toString("base64url");
+}
+
+function buildAuthorizeUrl(params) {
+  const url = new URL(params.authorizationEndpoint);
+  url.searchParams.set("client_id", params.clientId);
+  url.searchParams.set("scope", params.scopes.join(" "));
+  url.searchParams.set("redirect_uri", params.redirectUri);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("state", params.state);
+  url.searchParams.set("code_challenge", params.codeChallenge);
+  url.searchParams.set("code_challenge_method", "S256");
+
+  return url.toString();
+}
+
+function normalizeTokenSet(payload) {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Invalid token response payload.");
+  }
+
+  if (typeof payload.access_token !== "string" || !payload.access_token.trim()) {
+    const fallbackError =
+      typeof payload.error_description === "string"
+        ? payload.error_description
+        : typeof payload.error === "string"
+          ? payload.error
+          : "Customer auth token response missing access_token";
+    throw new Error(fallbackError);
+  }
+
+  let expiresAt;
+  if (typeof payload.expires_in === "number" && Number.isFinite(payload.expires_in) && payload.expires_in > 0) {
+    expiresAt = new Date(Date.now() + payload.expires_in * 1000).toISOString();
+  }
+
+  return {
+    accessToken: payload.access_token,
+    refreshToken: typeof payload.refresh_token === "string" ? payload.refresh_token : undefined,
+    idToken: typeof payload.id_token === "string" ? payload.id_token : undefined,
+    tokenType: typeof payload.token_type === "string" ? payload.token_type : undefined,
+    scope: typeof payload.scope === "string" ? payload.scope : undefined,
+    expiresAt
+  };
+}
+
+async function postTokenRequest(tokenEndpoint, body) {
+  const response = await fetch(tokenEndpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json"
+    },
+    body: body.toString()
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload) {
+    const message =
+      payload && typeof payload === "object" && typeof payload.error_description === "string"
+        ? payload.error_description
+        : payload && typeof payload === "object" && typeof payload.error === "string"
+          ? payload.error
+          : "Failed customer auth token request";
+    throw new Error(message);
+  }
+
+  return normalizeTokenSet(payload);
+}
+
+function parseTokenPayload(raw) {
+  if (typeof raw !== "string" || !raw) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.accessToken !== "string") {
+      return undefined;
+    }
+
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+export function createCustomerAuthAdapter(config) {
   return {
     async getConfig() {
-      const payload = await controlPlaneClient.fetchCustomerAuthConfig();
-      return normalizeConfig(payload);
+      const runtimeState = await getRuntimeState(config);
+      const shopify = getShopifySecrets(runtimeState);
+
+      const supportedMethods = Array.isArray(shopify.customerAuth.supportedMethods)
+        ? shopify.customerAuth.supportedMethods.filter(
+            (method) => method === "shopify_hosted" || method === "customer_account_api"
+          )
+        : ["shopify_hosted"];
+
+      const recommendedMethod =
+        shopify.customerAuth.recommendedMethod === "customer_account_api" &&
+        supportedMethods.includes("customer_account_api")
+          ? "customer_account_api"
+          : FALLBACK_METHOD;
+
+      const configuredActiveMethod =
+        shopify.customerAuth.activeMethod === "customer_account_api" &&
+        supportedMethods.includes("customer_account_api")
+          ? "customer_account_api"
+          : FALLBACK_METHOD;
+
+      const activeMethod =
+        configuredActiveMethod && supportedMethods.includes(configuredActiveMethod)
+          ? configuredActiveMethod
+          : recommendedMethod;
+
+      return {
+        detectedAt: typeof shopify.customerAuth.detectedAt === "string"
+          ? shopify.customerAuth.detectedAt
+          : new Date().toISOString(),
+        activeMethod,
+        recommendedMethod,
+        supportedMethods: supportedMethods.length > 0 ? supportedMethods : [FALLBACK_METHOD],
+        hosted: {
+          accountsEnabled: Boolean(shopify.hosted.accountsEnabled),
+          accountType: typeof shopify.hosted.accountType === "string" ? shopify.hosted.accountType : "unknown",
+          loginUrl:
+            typeof shopify.hosted.loginUrl === "string" && shopify.hosted.loginUrl
+              ? shopify.hosted.loginUrl
+              : shopify.shopDomain
+                ? "https://" + shopify.shopDomain + "/account/login"
+                : "",
+          accountUrl:
+            typeof shopify.hosted.accountUrl === "string" && shopify.hosted.accountUrl
+              ? shopify.hosted.accountUrl
+              : shopify.shopDomain
+                ? "https://" + shopify.shopDomain + "/account"
+                : ""
+        },
+        customerAccountApi: {
+          enabled: Boolean(shopify.customerAccountApi.enabled),
+          hasClientId: typeof shopify.customerAccountApi.clientId === "string" && shopify.customerAccountApi.clientId.length > 0,
+          scopes: normalizeScopes(shopify.customerAccountApi.scopes),
+          issuer: typeof shopify.customerAccountApi.issuer === "string" ? shopify.customerAccountApi.issuer : undefined,
+          authorizationEndpoint:
+            typeof shopify.customerAccountApi.authorizationEndpoint === "string"
+              ? shopify.customerAccountApi.authorizationEndpoint
+              : undefined,
+          tokenEndpoint:
+            typeof shopify.customerAccountApi.tokenEndpoint === "string"
+              ? shopify.customerAccountApi.tokenEndpoint
+              : undefined
+        },
+        endpoints: {
+          start: "/api/customer-auth/start",
+          sessionBase: "/api/customer-auth/session",
+          refresh: "/api/customer-auth/refresh"
+        }
+      };
     },
     async setMethod(activeMethod) {
-      return controlPlaneClient.setActiveCustomerAuthMethod(activeMethod);
+      const runtimeState = await getRuntimeState(config);
+      const currentSecrets = asRecord(runtimeState.secrets);
+      const currentShopify = asRecord(currentSecrets.shopify);
+      const currentCustomerAuth = asRecord(currentShopify.customerAuth);
+
+      const nextCustomerAuth = {
+        ...currentCustomerAuth,
+        activeMethod
+      };
+
+      const nextState = {
+        version: runtimeState.version,
+        config: runtimeState.config,
+        secrets: {
+          ...currentSecrets,
+          shopify: {
+            ...currentShopify,
+            customerAuth: nextCustomerAuth
+          }
+        }
+      };
+
+      await saveRuntimeState(config, nextState);
+      return { ok: true, activeMethod };
     },
     async start() {
-      return controlPlaneClient.startCustomerAuth();
+      const runtimeState = await getRuntimeState(config);
+      const shopify = getShopifySecrets(runtimeState);
+      const pool = await getRuntimePool(runtimeState);
+
+      if (!shopify.shopDomain) {
+        throw new Error("Shop domain is missing in runtime secrets.");
+      }
+
+      const clientId = typeof shopify.customerAccountApi.clientId === "string" ? shopify.customerAccountApi.clientId : "";
+      const authorizationEndpoint =
+        typeof shopify.customerAccountApi.authorizationEndpoint === "string"
+          ? shopify.customerAccountApi.authorizationEndpoint
+          : "";
+      const redirectUri = typeof shopify.customerAccountApi.callbackUrl === "string" ? shopify.customerAccountApi.callbackUrl : "";
+      const scopes = normalizeScopes(shopify.customerAccountApi.scopes);
+
+      if (!shopify.customerAccountApi.enabled || !clientId || !authorizationEndpoint || !redirectUri) {
+        throw new Error("Customer Account API auth is not available for this store.");
+      }
+
+      const sessionId = randomUUID();
+      const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+      const pkce = createPkcePair();
+      const state = createUnsignedState({
+        projectId: config.projectId,
+        shopDomain: shopify.shopDomain,
+        sessionId
+      });
+
+      const authUrl = buildAuthorizeUrl({
+        authorizationEndpoint,
+        clientId,
+        redirectUri,
+        scopes,
+        state,
+        codeChallenge: pkce.codeChallenge
+      });
+
+      await pool.query(
+        "insert into customer_auth_sessions (id, status, code_verifier, expires_at, created_at, updated_at) values ($1, 'pending', $2, $3, now(), now()) on conflict (id) do update set status = excluded.status, code_verifier = excluded.code_verifier, expires_at = excluded.expires_at, token_payload_encrypted = null, error = null, updated_at = now()",
+        [sessionId, pkce.codeVerifier, expiresAt]
+      );
+
+      return {
+        sessionId,
+        status: "pending",
+        expiresAt,
+        authUrl
+      };
     },
     async getSession(sessionId) {
-      return controlPlaneClient.fetchCustomerAuthSession(sessionId);
+      const runtimeState = await getRuntimeState(config);
+      const pool = await getRuntimePool(runtimeState);
+
+      const result = await pool.query(
+        "select id, status, code_verifier, token_payload_encrypted, error, expires_at, created_at, updated_at from customer_auth_sessions where id = $1 limit 1",
+        [sessionId]
+      );
+
+      const row = result.rows[0];
+      if (!row) {
+        const known = await pool.query(
+          "select id from customer_auth_sessions order by created_at desc limit 10"
+        );
+
+        return {
+          status: "failed",
+          error: "Customer auth session not found.",
+          requestedSessionId: sessionId,
+          knownSessionIds: known.rows
+            .map((entry) => (typeof entry.id === "string" ? entry.id : ""))
+            .filter(Boolean)
+        };
+      }
+
+      const status = typeof row.status === "string" ? row.status : "pending";
+      const expiresAt =
+        typeof row.expires_at === "string"
+          ? row.expires_at
+          : row.expires_at instanceof Date
+            ? row.expires_at.toISOString()
+            : "";
+      const expiresAtMs = Date.parse(expiresAt);
+
+      if (status === "pending" && Number.isFinite(expiresAtMs) && expiresAtMs < Date.now()) {
+        await pool.query(
+          "update customer_auth_sessions set status = 'expired', error = coalesce(error, 'Customer auth session expired.'), code_verifier = null, updated_at = now() where id = $1",
+          [sessionId]
+        );
+        return { status: "expired", error: "Customer auth session expired." };
+      }
+
+      if (status === "completed") {
+        const tokens = parseTokenPayload(row.token_payload_encrypted);
+        if (!tokens) {
+          return { status: "failed", error: "Completed session is missing token payload." };
+        }
+
+        await pool.query(
+          "update customer_auth_sessions set status = 'consumed', code_verifier = null, token_payload_encrypted = null, error = null, updated_at = now() where id = $1",
+          [sessionId]
+        );
+
+        return { status: "completed", tokens };
+      }
+
+      if (status === "failed") {
+        return { status: "failed", error: typeof row.error === "string" ? row.error : "Customer auth failed." };
+      }
+
+      if (status === "expired") {
+        return { status: "expired", error: typeof row.error === "string" ? row.error : "Customer auth session expired." };
+      }
+
+      if (status === "consumed") {
+        return { status: "consumed" };
+      }
+
+      return { status: "pending" };
     },
     async refresh(refreshToken) {
-      return controlPlaneClient.refreshCustomerAuth(refreshToken);
+      const runtimeState = await getRuntimeState(config);
+      const shopify = getShopifySecrets(runtimeState);
+      const tokenEndpoint =
+        typeof shopify.customerAccountApi.tokenEndpoint === "string"
+          ? shopify.customerAccountApi.tokenEndpoint
+          : "";
+      const clientId = typeof shopify.customerAccountApi.clientId === "string" ? shopify.customerAccountApi.clientId : "";
+
+      if (!tokenEndpoint || !clientId) {
+        throw new Error("Customer Account API token refresh is unavailable.");
+      }
+
+      const body = new URLSearchParams();
+      body.set("grant_type", "refresh_token");
+      body.set("client_id", clientId);
+      body.set("refresh_token", refreshToken);
+
+      const tokens = await postTokenRequest(tokenEndpoint, body);
+      return { tokens };
     }
   };
 }
@@ -904,7 +1498,7 @@ import express from "express";
 import { runtimeConfig } from "./config.js";
 import { createCatalogAdapter } from "./adapters/catalog-adapter.js";
 import { createCustomerAuthAdapter } from "./adapters/customer-auth-adapter.js";
-import { createControlPlaneClient } from "./lib/control-plane-client.js";
+import { getRuntimeState, initRuntimeStateStore, saveRuntimeState } from "./lib/runtime-state-store.js";
 
 const app = express();
 
@@ -916,9 +1510,10 @@ app.use(
 );
 app.use(express.json({ limit: "1mb" }));
 
-const controlPlaneClient = createControlPlaneClient(runtimeConfig);
-const catalogAdapter = createCatalogAdapter(controlPlaneClient);
-const customerAuthAdapter = createCustomerAuthAdapter(controlPlaneClient);
+const catalogAdapter = createCatalogAdapter(runtimeConfig);
+const customerAuthAdapter = createCustomerAuthAdapter(runtimeConfig);
+
+await initRuntimeStateStore(runtimeConfig);
 
 function asErrorMessage(caught) {
   return caught instanceof Error ? caught.message : "Request failed";
@@ -932,13 +1527,96 @@ function asyncRoute(handler) {
   };
 }
 
-app.get("/api/health", (_request, response) => {
-  response.json({
-    status: "ok",
-    projectId: runtimeConfig.projectId,
-    controlPlaneBaseUrl: runtimeConfig.controlPlaneBaseUrl
-  });
-});
+function isRuntimeSyncAuthorized(request) {
+  const expectedToken = runtimeConfig.runtimeSyncToken;
+  if (!expectedToken) {
+    return true;
+  }
+
+  const authorization = request.header("authorization") || "";
+  if (!authorization.startsWith("Bearer ")) {
+    return false;
+  }
+
+  return authorization.slice("Bearer ".length).trim() === expectedToken;
+}
+
+function normalizeRuntimeSyncBody(rawBody) {
+  const body = rawBody && typeof rawBody === "object" ? rawBody : {};
+  const projectId = typeof body.projectId === "string" ? body.projectId.trim() : "";
+  const version = Number(body.version ?? NaN);
+
+  if (!projectId) {
+    throw new Error("projectId is required.");
+  }
+
+  if (!Number.isFinite(version) || version < 0) {
+    throw new Error("version must be a non-negative number.");
+  }
+
+  return {
+    projectId,
+    version,
+    config: body.config && typeof body.config === "object" ? body.config : {},
+    secrets: body.secrets && typeof body.secrets === "object" ? body.secrets : {}
+  };
+}
+
+app.get(
+  "/api/health",
+  asyncRoute(async (_request, response) => {
+    const runtimeState = await getRuntimeState(runtimeConfig);
+
+    response.json({
+      status: "ok",
+      projectId: runtimeConfig.projectId,
+      runtimeSyncVersion: runtimeState.version,
+      runtimeDatabaseConfigured: Boolean(runtimeState?.secrets?.runtime?.database?.databaseUrl)
+    });
+  })
+);
+
+app.post(
+  "/internal/runtime/sync",
+  asyncRoute(async (request, response) => {
+    if (!isRuntimeSyncAuthorized(request)) {
+      response.status(401).json({ error: "Unauthorized runtime sync request." });
+      return;
+    }
+
+    const payload = normalizeRuntimeSyncBody(request.body);
+    if (payload.projectId !== runtimeConfig.projectId) {
+      response.status(409).json({
+        error: "projectId mismatch for runtime sync.",
+        expectedProjectId: runtimeConfig.projectId,
+        receivedProjectId: payload.projectId
+      });
+      return;
+    }
+
+    const current = await getRuntimeState(runtimeConfig);
+    if (payload.version < current.version) {
+      response.json({
+        ok: true,
+        ignored: true,
+        currentVersion: current.version
+      });
+      return;
+    }
+
+    const next = await saveRuntimeState(runtimeConfig, {
+      version: payload.version,
+      config: payload.config,
+      secrets: payload.secrets
+    });
+
+    response.json({
+      ok: true,
+      appliedVersion: next.version,
+      ignored: false
+    });
+  })
+);
 
 app.get(
   "/api/catalog",
@@ -958,6 +1636,11 @@ app.get(
     }
 
     const payload = await catalogAdapter.getProductByHandle(handle);
+    if (payload && typeof payload === "object" && typeof payload.error === "string") {
+      response.status(404).json(payload);
+      return;
+    }
+
     response.json(payload);
   })
 );
@@ -1058,7 +1741,8 @@ function getRequiredBaselineFiles(input: ShopifyBaselineInput): string[] {
     toWorkspacePath(expoBackendDir, "package.json"),
     toWorkspacePath(expoBackendDir, "src/index.js"),
     toWorkspacePath(expoBackendDir, "src/config.js"),
-    toWorkspacePath(expoBackendDir, "src/lib/control-plane-client.js"),
+    toWorkspacePath(expoBackendDir, "src/lib/runtime-state-store.js"),
+    toWorkspacePath(expoBackendDir, "src/lib/shopify-admin-client.js"),
     toWorkspacePath(expoBackendDir, "src/adapters/catalog-adapter.js"),
     toWorkspacePath(expoBackendDir, "src/adapters/customer-auth-adapter.js")
   ];
@@ -1766,13 +2450,13 @@ export function renderShopifyBaselineFiles(input: ShopifyBaselineInput): Record<
     [toWorkspacePath(expoBackendDir, "README.md")]: renderRuntimeBackendReadme(input),
     [toWorkspacePath(expoBackendDir, "src/config.js")]: renderRuntimeBackendConfig(input),
     [toWorkspacePath(expoBackendDir, "src/index.js")]: renderRuntimeBackendServer(),
-    [toWorkspacePath(expoBackendDir, "src/lib/http-client.js")]: renderRuntimeBackendHttpClient(),
-    [toWorkspacePath(expoBackendDir, "src/lib/control-plane-client.js")]: renderRuntimeBackendControlPlaneClient(),
+    [toWorkspacePath(expoBackendDir, "src/lib/runtime-state-store.js")]: renderRuntimeBackendRuntimeStateStore(),
+    [toWorkspacePath(expoBackendDir, "src/lib/shopify-admin-client.js")]: renderRuntimeBackendShopifyAdminClient(),
     [toWorkspacePath(expoBackendDir, "src/adapters/catalog-adapter.js")]: renderRuntimeBackendCatalogAdapter(),
     [toWorkspacePath(expoBackendDir, "src/adapters/customer-auth-adapter.js")]: renderRuntimeBackendCustomerAuthAdapter(),
     ".shopify-baseline.json": JSON.stringify(
       {
-        version: 2,
+        version: 3,
         appliedAt: new Date().toISOString(),
         shopDomain: input.shopDomain,
         mobileAppDir,

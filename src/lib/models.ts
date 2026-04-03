@@ -23,9 +23,7 @@ export interface PreviewModel {
 }
 
 export interface ShopifyConnection {
-  shopDomain: string;
-  accessToken?: string;
-  accessTokenEncrypted?: string;
+  shopDomain?: string;
   connectedAt: string;
   customerAuth?: ShopifyCustomerAuthState;
 }
@@ -166,7 +164,7 @@ export interface Project {
 }
 
 export interface PublicStoreConnection {
-  shopDomain: string;
+  shopDomain?: string;
   connectedAt: string;
   hasAccessToken: boolean;
   customerAuth?: PublicShopifyCustomerAuthState;

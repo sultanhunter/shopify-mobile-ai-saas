@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getProject } from "@/lib/db";
+import { getProjectRuntimeSecrets } from "@/lib/runtime-sync";
+import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
 import { refreshCustomerAuthToken } from "@/lib/shopify-customer-auth";
 
 export const runtime = "nodejs";
@@ -27,9 +29,10 @@ export async function POST(request: NextRequest, { params }: Params) {
       return NextResponse.json({ error: "Project not found." }, { status: 404 });
     }
 
-    const auth = project.store?.customerAuth;
-    const tokenEndpoint = auth?.customerAccountApi.tokenEndpoint;
-    const clientId = auth?.customerAccountApi.clientId;
+    const runtimeSecrets = await getProjectRuntimeSecrets(project.id);
+    const parsed = parseRuntimeSecrets(runtimeSecrets);
+    const tokenEndpoint = parsed.shopify?.customerAuth?.customerAccountApi.tokenEndpoint;
+    const clientId = parsed.shopify?.customerAuth?.customerAccountApi.clientId;
     if (!tokenEndpoint || !clientId) {
       return NextResponse.json({ error: "Customer Account API token refresh is unavailable." }, { status: 409 });
     }

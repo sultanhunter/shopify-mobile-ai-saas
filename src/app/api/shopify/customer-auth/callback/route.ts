@@ -1,15 +1,59 @@
 import { NextRequest } from "next/server";
-import { getProject, updateProject } from "@/lib/db";
+import {
+  getRuntimeCustomerAuthSession,
+  markRuntimeCustomerAuthSessionCompleted,
+  markRuntimeCustomerAuthSessionExpired,
+  markRuntimeCustomerAuthSessionFailed
+} from "@/lib/project-runtime-db";
+import { getProjectRuntimeSecrets } from "@/lib/runtime-sync";
+import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
 import {
   exchangeCustomerAuthCode,
   getCustomerAuthCallbackUrl,
   verifyCustomerAuthState,
 } from "@/lib/shopify-customer-auth";
-import { encryptSecret } from "@/lib/secret-crypto";
 import { normalizeShopDomain } from "@/lib/shopify";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
+
+interface UnsignedCustomerAuthStatePayload {
+  projectId: string;
+  shopDomain: string;
+  sessionId: string;
+  nonce: string;
+  expiresAt: number;
+}
+
+function parseUnsignedCustomerAuthState(rawState: string): UnsignedCustomerAuthStatePayload | null {
+  try {
+    const json = Buffer.from(rawState, "base64url").toString("utf8");
+    const payload = JSON.parse(json) as Partial<UnsignedCustomerAuthStatePayload>;
+    if (
+      typeof payload.projectId !== "string" ||
+      typeof payload.shopDomain !== "string" ||
+      typeof payload.sessionId !== "string" ||
+      typeof payload.nonce !== "string" ||
+      typeof payload.expiresAt !== "number"
+    ) {
+      return null;
+    }
+
+    if (payload.expiresAt < Date.now()) {
+      return null;
+    }
+
+    return {
+      projectId: payload.projectId,
+      shopDomain: payload.shopDomain,
+      sessionId: payload.sessionId,
+      nonce: payload.nonce,
+      expiresAt: payload.expiresAt
+    };
+  } catch {
+    return null;
+  }
+}
 
 function renderResultHtml(status: "success" | "error", message: string): string {
   const color = status === "success" ? "#065f46" : "#991b1b";
@@ -37,37 +81,8 @@ function renderResultHtml(status: "success" | "error", message: string): string 
 </html>`;
 }
 
-async function failSession(projectId: string, sessionId: string, error: string): Promise<void> {
-  await updateProject(projectId, (current) => {
-    const now = new Date().toISOString();
-    const sessions = (current.store?.customerAuth?.sessions ?? []).map((entry) =>
-      entry.id === sessionId
-        ? {
-            ...entry,
-            status: "failed" as const,
-            updatedAt: now,
-            error,
-            codeVerifier: undefined,
-          }
-        : entry
-    );
-
-    return {
-      ...current,
-      updatedAt: now,
-      store: current.store
-        ? {
-            ...current.store,
-            customerAuth: current.store.customerAuth
-              ? {
-                  ...current.store.customerAuth,
-                  sessions,
-                }
-              : current.store.customerAuth,
-          }
-        : current.store,
-    };
-  });
+async function failSession(databaseUrl: string, sessionId: string, error: string): Promise<void> {
+  await markRuntimeCustomerAuthSessionFailed(databaseUrl, sessionId, error);
 }
 
 export async function GET(request: NextRequest) {
@@ -84,7 +99,10 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const parsedState = verifyCustomerAuthState(state);
+  const signedState = verifyCustomerAuthState(state);
+  const unsignedState = parseUnsignedCustomerAuthState(state);
+  const parsedState = signedState ?? unsignedState;
+
   if (!parsedState) {
     return new Response(renderResultHtml("error", "The auth state is invalid or expired. Start sign in again."), {
       status: 400,
@@ -92,24 +110,34 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const shopDomain = parsedState.shopDomain;
   const queryShopDomain = rawShop ? normalizeShopDomain(rawShop) : null;
-  if (rawShop && (!queryShopDomain || queryShopDomain !== shopDomain)) {
+  if (rawShop && (!queryShopDomain || queryShopDomain !== parsedState.shopDomain)) {
     return new Response(renderResultHtml("error", "Shop domain mismatch in callback. Start sign in again."), {
       status: 400,
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
 
-  const project = await getProject(parsedState.projectId);
-  if (!project?.store?.customerAuth) {
+  const runtimeSecrets = await getProjectRuntimeSecrets(parsedState.projectId);
+  const parsedSecrets = parseRuntimeSecrets(runtimeSecrets);
+  const runtimeDatabaseUrl = parsedSecrets.runtime?.database?.databaseUrl;
+
+  if (!runtimeDatabaseUrl) {
+    return new Response(renderResultHtml("error", "Runtime database is not configured for this project."), {
+      status: 409,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+
+  const shopDomain = parsedSecrets.shopify?.shopDomain;
+  if (!shopDomain || shopDomain !== parsedState.shopDomain) {
     return new Response(renderResultHtml("error", "Project auth context was not found. Please retry sign in."), {
       status: 404,
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
 
-  const session = (project.store.customerAuth.sessions ?? []).find((entry) => entry.id === parsedState.sessionId);
+  const session = await getRuntimeCustomerAuthSession(runtimeDatabaseUrl, parsedState.sessionId);
   if (!session) {
     return new Response(renderResultHtml("error", "Auth session was not found. Please retry sign in."), {
       status: 404,
@@ -117,20 +145,55 @@ export async function GET(request: NextRequest) {
     });
   }
 
+  if (session.status === "failed") {
+    return new Response(renderResultHtml("error", session.error ?? "Customer auth failed."), {
+      status: 400,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+
+  if (session.status === "expired") {
+    return new Response(renderResultHtml("error", session.error ?? "Customer auth session expired."), {
+      status: 400,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+
+  if (session.status === "completed" || session.status === "consumed") {
+    return new Response(
+      renderResultHtml("success", "Sign in already completed. You can return to the app and continue."),
+      {
+        status: 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      }
+    );
+  }
+
+  const expiresAtMs = Date.parse(session.expiresAt);
+  if (Number.isFinite(expiresAtMs) && expiresAtMs < Date.now()) {
+    await markRuntimeCustomerAuthSessionExpired(runtimeDatabaseUrl, session.id);
+    return new Response(renderResultHtml("error", "Customer auth session expired."), {
+      status: 400,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+
   if (oauthError) {
     const message = oauthErrorDescription || oauthError;
-    await failSession(project.id, session.id, message);
+    await failSession(runtimeDatabaseUrl, session.id, message);
     return new Response(renderResultHtml("error", message), {
       status: 400,
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
 
-  const tokenEndpoint = project.store.customerAuth.customerAccountApi.tokenEndpoint;
-  const clientId = project.store.customerAuth.customerAccountApi.clientId;
-  const callbackUrl = getCustomerAuthCallbackUrl(request.nextUrl.origin);
+  const tokenEndpoint = parsedSecrets.shopify?.customerAuth?.customerAccountApi.tokenEndpoint;
+  const clientId = parsedSecrets.shopify?.customerAuth?.customerAccountApi.clientId;
+  const callbackUrl =
+    parsedSecrets.shopify?.customerAuth?.customerAccountApi.callbackUrl || getCustomerAuthCallbackUrl(request.nextUrl.origin);
+
   if (!tokenEndpoint || !clientId || !callbackUrl || !code || !session.codeVerifier) {
-    await failSession(project.id, session.id, "Customer Account API configuration is incomplete.");
+    await failSession(runtimeDatabaseUrl, session.id, "Customer Account API configuration is incomplete.");
     return new Response(renderResultHtml("error", "Customer Account API configuration is incomplete."), {
       status: 409,
       headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -146,36 +209,10 @@ export async function GET(request: NextRequest) {
       redirectUri: callbackUrl,
     });
 
-    await updateProject(project.id, (current) => {
-      const now = new Date().toISOString();
-      const sessions = (current.store?.customerAuth?.sessions ?? []).map((entry) =>
-        entry.id === session.id
-          ? {
-              ...entry,
-              status: "completed" as const,
-              updatedAt: now,
-              tokenPayloadEncrypted: encryptSecret(JSON.stringify(tokenSet)),
-              codeVerifier: undefined,
-              error: undefined,
-            }
-          : entry
-      );
-
-      return {
-        ...current,
-        updatedAt: now,
-        store: current.store
-          ? {
-              ...current.store,
-              customerAuth: current.store.customerAuth
-                ? {
-                    ...current.store.customerAuth,
-                    sessions,
-                  }
-                : current.store.customerAuth,
-            }
-          : current.store,
-      };
+    await markRuntimeCustomerAuthSessionCompleted({
+      databaseUrl: runtimeDatabaseUrl,
+      sessionId: session.id,
+      tokenPayloadEncrypted: JSON.stringify(tokenSet)
     });
 
     return new Response(
@@ -187,7 +224,7 @@ export async function GET(request: NextRequest) {
     );
   } catch (caught) {
     const message = caught instanceof Error ? caught.message : "Failed to exchange auth code.";
-    await failSession(project.id, session.id, message);
+    await failSession(runtimeDatabaseUrl, session.id, message);
     return new Response(renderResultHtml("error", message), {
       status: 500,
       headers: { "Content-Type": "text/html; charset=utf-8" },

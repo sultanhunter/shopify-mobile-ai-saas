@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
-import { getProject, updateProject } from "@/lib/db";
+import { getProject } from "@/lib/db";
+import {
+  consumeRuntimeCustomerAuthSession,
+  getRuntimeCustomerAuthSession,
+  markRuntimeCustomerAuthSessionExpired,
+  runRuntimeProjectMigrations
+} from "@/lib/project-runtime-db";
 import { ShopifyCustomerTokenSet } from "@/lib/shopify-customer-auth";
-import { decryptSecret } from "@/lib/secret-crypto";
+import { getProjectRuntimeSecrets } from "@/lib/runtime-sync";
+import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -20,13 +27,16 @@ function readTokenPayload(raw: string | undefined): ShopifyCustomerTokenSet | un
     return undefined;
   }
 
-  const decrypted = decryptSecret(raw);
-  const parsed = JSON.parse(decrypted) as ShopifyCustomerTokenSet;
-  if (!parsed || typeof parsed.accessToken !== "string") {
+  try {
+    const parsed = JSON.parse(raw) as ShopifyCustomerTokenSet;
+    if (!parsed || typeof parsed.accessToken !== "string") {
+      return undefined;
+    }
+
+    return parsed;
+  } catch {
     return undefined;
   }
-
-  return parsed;
 }
 
 export async function GET(_: Request, { params }: Params) {
@@ -36,15 +46,23 @@ export async function GET(_: Request, { params }: Params) {
       return NextResponse.json({ error: "Project not found." }, { status: 404 });
     }
 
-    const auth = project.store?.customerAuth;
-    const sessions = auth?.sessions ?? [];
-    const session = sessions.find((entry) => entry.id === params.sessionId);
+    const runtimeSecrets = await getProjectRuntimeSecrets(project.id);
+    const parsed = parseRuntimeSecrets(runtimeSecrets);
+    const runtimeDatabaseUrl = parsed.runtime?.database?.databaseUrl;
+
+    if (!runtimeDatabaseUrl) {
+      return NextResponse.json({ error: "Runtime database is not configured." }, { status: 409 });
+    }
+
+    await runRuntimeProjectMigrations(runtimeDatabaseUrl).catch(() => null);
+
+    const session = await getRuntimeCustomerAuthSession(runtimeDatabaseUrl, params.sessionId);
     if (!session) {
       return NextResponse.json(
         {
           error: "Customer auth session not found.",
           requestedSessionId: params.sessionId,
-          knownSessionIds: sessions.map((entry) => entry.id).slice(-10),
+          knownSessionIds: [],
         },
         {
           status: 404,
@@ -57,78 +75,8 @@ export async function GET(_: Request, { params }: Params) {
 
     const expiresAtMs = Date.parse(session.expiresAt);
     if (session.status === "pending" && Number.isFinite(expiresAtMs) && expiresAtMs < Date.now()) {
-      await updateProject(project.id, (current) => {
-        const now = new Date().toISOString();
-        const nextSessions = (current.store?.customerAuth?.sessions ?? []).map((entry) =>
-          entry.id === session.id
-            ? {
-                ...entry,
-                status: "expired" as const,
-                updatedAt: now,
-                error: entry.error ?? "Customer auth session expired.",
-              }
-            : entry
-        );
-
-        return {
-          ...current,
-          updatedAt: now,
-          store: current.store
-            ? {
-                ...current.store,
-                customerAuth: current.store.customerAuth
-                  ? {
-                      ...current.store.customerAuth,
-                      sessions: nextSessions,
-                    }
-                  : current.store.customerAuth,
-              }
-            : current.store,
-        };
-      });
-
+      await markRuntimeCustomerAuthSessionExpired(runtimeDatabaseUrl, session.id);
       return NextResponse.json({ status: "expired", error: "Customer auth session expired." });
-    }
-
-    if (session.status === "pending" && session.tokenPayloadEncrypted) {
-      const tokens = readTokenPayload(session.tokenPayloadEncrypted);
-      if (!tokens) {
-        return NextResponse.json({ status: "failed", error: "Session token payload is invalid." });
-      }
-
-      await updateProject(project.id, (current) => {
-        const now = new Date().toISOString();
-        const nextSessions = (current.store?.customerAuth?.sessions ?? []).map((entry) =>
-          entry.id === session.id
-            ? {
-                ...entry,
-                status: "consumed" as const,
-                updatedAt: now,
-                tokenPayloadEncrypted: undefined,
-                codeVerifier: undefined,
-                error: undefined,
-              }
-            : entry
-        );
-
-        return {
-          ...current,
-          updatedAt: now,
-          store: current.store
-            ? {
-                ...current.store,
-                customerAuth: current.store.customerAuth
-                  ? {
-                      ...current.store.customerAuth,
-                      sessions: nextSessions,
-                    }
-                  : current.store.customerAuth,
-              }
-            : current.store,
-        };
-      });
-
-      return NextResponse.json({ status: "completed", tokens });
     }
 
     if (session.status === "completed") {
@@ -137,37 +85,7 @@ export async function GET(_: Request, { params }: Params) {
         return NextResponse.json({ status: "failed", error: "Completed session is missing token payload." });
       }
 
-      await updateProject(project.id, (current) => {
-        const now = new Date().toISOString();
-        const nextSessions = (current.store?.customerAuth?.sessions ?? []).map((entry) =>
-          entry.id === session.id
-            ? {
-                ...entry,
-                status: "consumed" as const,
-                updatedAt: now,
-                tokenPayloadEncrypted: undefined,
-                codeVerifier: undefined,
-              }
-            : entry
-        );
-
-        return {
-          ...current,
-          updatedAt: now,
-          store: current.store
-            ? {
-                ...current.store,
-                customerAuth: current.store.customerAuth
-                  ? {
-                      ...current.store.customerAuth,
-                      sessions: nextSessions,
-                    }
-                  : current.store.customerAuth,
-              }
-            : current.store,
-        };
-      });
-
+      await consumeRuntimeCustomerAuthSession(runtimeDatabaseUrl, session.id);
       return NextResponse.json({ status: "completed", tokens });
     }
 

@@ -10,6 +10,11 @@ import {
 } from "@/lib/dev-runner";
 import { renderShopifyBaselineFiles, validateShopifyBaselineFiles } from "@/lib/shopify-baseline";
 import { detectCustomerAuthState } from "@/lib/shopify-customer-auth";
+import {
+  dispatchProjectRuntimeSync,
+  getProjectRuntimeSecrets,
+  upsertAndQueueProjectRuntimeSync
+} from "@/lib/runtime-sync";
 import { generateProjectUpdate } from "@/lib/llm";
 import { AiOutput } from "@/lib/ai-engine";
 import {
@@ -22,16 +27,11 @@ import {
   ShopifyCustomerAuthState,
   WorkspaceLayout,
 } from "@/lib/models";
-import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
+import { provisionNeonRuntimeDatabase } from "@/lib/neon-runtime";
+import { runRuntimeProjectMigrations } from "@/lib/project-runtime-db";
+import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
 
-function getControlPlaneBaseUrl() {
-  const appBaseUrl = process.env.NEXTJS_APP_BASE_URL?.trim() || process.env.APP_BASE_URL?.trim();
-  if (appBaseUrl) {
-    return appBaseUrl.replace(/\/$/, "");
-  }
-
-  return "http://localhost:3000";
-}
+const CLIENT_ID_CONFIGURED_SENTINEL = "__configured__";
 
 function createAssistantMessage(content: string, runId?: string): ChatMessage {
   return {
@@ -97,10 +97,78 @@ function resolveWorkspaceLayout(project: Project): WorkspaceLayout {
   };
 }
 
-function toPublicProject(project: Project): PublicProject {
-  const hasEncryptedToken = Boolean(project.store?.accessTokenEncrypted);
-  const hasLegacyToken = Boolean(project.store?.accessToken);
+function buildStoredCustomerAuthSummary(auth: ShopifyCustomerAuthState | undefined): ShopifyCustomerAuthState | undefined {
+  if (!auth) {
+    return undefined;
+  }
 
+  return {
+    detectedAt: auth.detectedAt,
+    activeMethod: auth.activeMethod,
+    recommendedMethod: auth.recommendedMethod,
+    supportedMethods: [...auth.supportedMethods],
+    hosted: auth.hosted,
+    customerAccountApi: {
+      enabled: auth.customerAccountApi.enabled,
+      clientId: auth.customerAccountApi.clientId ? CLIENT_ID_CONFIGURED_SENTINEL : undefined,
+      scopes: [],
+      issuer: undefined,
+      authorizationEndpoint: undefined,
+      tokenEndpoint: undefined,
+      revocationEndpoint: undefined,
+      endSessionEndpoint: undefined,
+      callbackUrl: undefined
+    },
+    sessions: undefined
+  };
+}
+
+function buildRuntimeConfigPatch(project: Project, customerAuth: ShopifyCustomerAuthState | undefined): Record<string, unknown> {
+  return {
+    projectId: project.id,
+    projectName: project.name,
+    brandColor: project.preview.primaryColor,
+    customerAuth: customerAuth
+      ? {
+          detectedAt: customerAuth.detectedAt,
+          activeMethod: customerAuth.activeMethod,
+          recommendedMethod: customerAuth.recommendedMethod,
+          supportedMethods: customerAuth.supportedMethods,
+          hosted: customerAuth.hosted,
+          customerAccountApi: {
+            enabled: customerAuth.customerAccountApi.enabled,
+            hasClientId: Boolean(customerAuth.customerAccountApi.clientId)
+          }
+        }
+      : undefined,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+async function buildRuntimeDatabaseSecretsPatch(projectId: string, currentSecrets: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const parsed = parseRuntimeSecrets(currentSecrets);
+  const existingDatabaseUrl = parsed.runtime?.database?.databaseUrl?.trim();
+  if (existingDatabaseUrl) {
+    await runRuntimeProjectMigrations(existingDatabaseUrl).catch(() => null);
+    return {};
+  }
+
+  const provisioned = await provisionNeonRuntimeDatabase(projectId);
+  await runRuntimeProjectMigrations(provisioned.databaseUrl);
+
+  return {
+    runtime: {
+      database: {
+        provider: provisioned.provider,
+        databaseName: provisioned.databaseName,
+        roleName: provisioned.roleName,
+        databaseUrl: provisioned.databaseUrl
+      }
+    }
+  };
+}
+
+function toPublicProject(project: Project): PublicProject {
   return {
     id: project.id,
     name: project.name,
@@ -115,9 +183,9 @@ function toPublicProject(project: Project): PublicProject {
     workspaceLayout: project.workspaceLayout,
     store: project.store
       ? {
-          shopDomain: project.store.shopDomain,
+          shopDomain: undefined,
           connectedAt: project.store.connectedAt,
-          hasAccessToken: hasEncryptedToken || hasLegacyToken,
+          hasAccessToken: Boolean(project.store.connectedAt),
           customerAuth: toPublicCustomerAuthState(project.store.customerAuth),
         }
       : undefined,
@@ -141,9 +209,9 @@ function toPublicCustomerAuthState(authState: ShopifyCustomerAuthState | undefin
       enabled: authState.customerAccountApi.enabled,
       hasClientId: Boolean(authState.customerAccountApi.clientId),
       scopes: [...authState.customerAccountApi.scopes],
-      issuer: authState.customerAccountApi.issuer,
-      authorizationEndpoint: authState.customerAccountApi.authorizationEndpoint,
-      tokenEndpoint: authState.customerAccountApi.tokenEndpoint,
+      issuer: undefined,
+      authorizationEndpoint: undefined,
+      tokenEndpoint: undefined,
     },
   };
 }
@@ -249,37 +317,56 @@ export async function connectStoreToProject(params: {
   const workspaceLayout = resolveWorkspaceLayout(project);
 
   const fallbackOrigin = process.env.NEXTJS_APP_BASE_URL?.trim() || process.env.APP_BASE_URL?.trim() || "http://localhost:3000";
-  const resolvedAccessToken =
-    params.accessToken?.trim() ||
-    (project.store?.accessTokenEncrypted ? decryptSecret(project.store.accessTokenEncrypted) : project.store?.accessToken);
-  let detectedCustomerAuth = project.store?.customerAuth;
+  const existingRuntimeSecrets = await getProjectRuntimeSecrets(project.id);
+  const parsedRuntimeSecrets = parseRuntimeSecrets(existingRuntimeSecrets);
+  const resolvedAccessToken = params.accessToken?.trim() || parsedRuntimeSecrets.shopify?.adminAccessToken?.trim();
+
+  if (!resolvedAccessToken) {
+    throw new Error("Shopify admin access token is required to connect store.");
+  }
+
+  let detectedCustomerAuth = parsedRuntimeSecrets.shopify?.customerAuth;
 
   try {
     detectedCustomerAuth = await detectCustomerAuthState({
       shopDomain: domain,
       accessToken: resolvedAccessToken,
       fallbackOrigin,
-      current: project.store?.customerAuth,
+      current: parsedRuntimeSecrets.shopify?.customerAuth,
     });
   } catch {
-    detectedCustomerAuth = project.store?.customerAuth;
+    detectedCustomerAuth = parsedRuntimeSecrets.shopify?.customerAuth;
   }
+
+  const runtimeDatabasePatch = await buildRuntimeDatabaseSecretsPatch(project.id, existingRuntimeSecrets);
+
+  await upsertAndQueueProjectRuntimeSync({
+    projectId: project.id,
+    config: buildRuntimeConfigPatch(project, detectedCustomerAuth),
+    secrets: {
+      ...runtimeDatabasePatch,
+      shopify: {
+        shopDomain: domain,
+        adminAccessToken: resolvedAccessToken,
+        customerAuth: detectedCustomerAuth
+          ? {
+              ...detectedCustomerAuth,
+              sessions: undefined
+            }
+          : undefined
+      }
+    }
+  });
 
   const now = new Date().toISOString();
   const connected = await updateProject(project.id, (current) => {
-    const encryptedAccessToken = params.accessToken
-      ? encryptSecret(params.accessToken)
-      : current.store?.accessTokenEncrypted;
-
     return {
       ...current,
       updatedAt: now,
       store: {
-        shopDomain: domain,
-        accessToken: params.accessToken ? undefined : current.store?.accessToken,
-        accessTokenEncrypted: encryptedAccessToken,
+        shopDomain: undefined,
         connectedAt: now,
-        customerAuth: detectedCustomerAuth,
+        customerAuth: buildStoredCustomerAuthSummary(detectedCustomerAuth),
       },
       workspaceLayout: current.workspaceLayout ?? workspaceLayout,
       messages: [...current.messages, createAssistantMessage(`Store connected: ${domain}. Applying Shopify baseline...`)]
@@ -290,12 +377,10 @@ export async function connectStoreToProject(params: {
     throw new Error("Project not found");
   }
 
-  const controlPlaneBaseUrl = getControlPlaneBaseUrl();
   const baselineInput = {
     projectId: connected.id,
     projectName: connected.name,
     shopDomain: domain,
-    controlPlaneBaseUrl,
     mobileAppDir: workspaceLayout.mobileAppDir,
     expoBackendDir: workspaceLayout.expoBackendDir,
     expoBackendPort: workspaceLayout.expoBackendPort,
@@ -315,15 +400,26 @@ export async function connectStoreToProject(params: {
     ...current,
     updatedAt: new Date().toISOString(),
     fileIndex: applied.fileIndex,
-      messages: [
-        ...current.messages,
-        createAssistantMessage(
-          `Store connected: ${domain}. Shopify baseline was applied to ${workspaceLayout.mobileAppDir}/ and ${workspaceLayout.expoBackendDir}/.`
-        )
-      ]
-    }));
+    messages: [
+      ...current.messages,
+      createAssistantMessage(
+        `Store connected: ${domain}. Shopify baseline was applied to ${workspaceLayout.mobileAppDir}/ and ${workspaceLayout.expoBackendDir}/.`
+      )
+    ]
+  }));
 
-  return toPublicProject(finalized ?? connected);
+  const nextProject = finalized ?? connected;
+
+  try {
+    await dispatchProjectRuntimeSync({
+      projectId: nextProject.id,
+      expoBackendBaseUrl: nextProject.devSession?.expoBackendUrl ?? nextProject.devSession?.backendUrl,
+    });
+  } catch {
+    // Runtime sync can be retried from dev-session refresh.
+  }
+
+  return toPublicProject(nextProject);
 }
 
 export async function runPrompt(
@@ -423,16 +519,9 @@ async function persistPromptOutput(
 }
 
 export async function getProjectStoreAdminAccessToken(projectId: string): Promise<string | undefined> {
-  const project = await getProject(projectId);
-  if (!project?.store) {
-    return undefined;
-  }
-
-  if (project.store.accessTokenEncrypted) {
-    return decryptSecret(project.store.accessTokenEncrypted);
-  }
-
-  return project.store.accessToken;
+  const secrets = await getProjectRuntimeSecrets(projectId);
+  const parsed = parseRuntimeSecrets(secrets);
+  return parsed.shopify?.adminAccessToken;
 }
 
 export async function startProjectDevSession(
@@ -448,12 +537,29 @@ export async function startProjectDevSession(
     throw new Error("GitHub repository is required before starting a dev session.");
   }
 
+  try {
+    const existingRuntimeSecrets = await getProjectRuntimeSecrets(project.id);
+    const runtimeDatabasePatch = await buildRuntimeDatabaseSecretsPatch(project.id, existingRuntimeSecrets);
+    if (Object.keys(runtimeDatabasePatch).length > 0) {
+      await upsertAndQueueProjectRuntimeSync({
+        projectId: project.id,
+        config: buildRuntimeConfigPatch(project, project.store?.customerAuth),
+        secrets: runtimeDatabasePatch
+      });
+    }
+  } catch (error) {
+    if (project.store?.connectedAt) {
+      throw error instanceof Error
+        ? error
+        : new Error("Failed to provision runtime database before starting dev session.");
+    }
+  }
+
   const workspaceLayout = resolveWorkspaceLayout(project);
 
   const session = await startDevRunnerSession({
     projectId: project.id,
     repoUrl: project.github.repoUrl,
-    controlPlaneBaseUrl: getControlPlaneBaseUrl(),
     branch: "main",
     install: options?.install ?? true,
     useTunnel: options?.useTunnel ?? true,
@@ -482,6 +588,15 @@ export async function startProjectDevSession(
 
   if (!updated) {
     throw new Error("Project not found");
+  }
+
+  try {
+    await dispatchProjectRuntimeSync({
+      projectId: updated.id,
+      expoBackendBaseUrl: normalized.expoBackendUrl ?? normalized.backendUrl,
+    });
+  } catch {
+    // Runtime sync can be retried on next refresh.
   }
 
   return {
@@ -558,6 +673,15 @@ export async function refreshProjectDevSession(
 
   if (!updated) {
     throw new Error("Project not found");
+  }
+
+  try {
+    await dispatchProjectRuntimeSync({
+      projectId: updated.id,
+      expoBackendBaseUrl: normalized.expoBackendUrl ?? normalized.backendUrl,
+    });
+  } catch {
+    // Runtime sync can be retried on next refresh.
   }
 
   return {

@@ -20,6 +20,8 @@ This is a brand-new SaaS prototype that matches your requested flow:
 - Shopify baseline now scaffolds a modular per-workspace Node expo backend (`expo-backend/`) for Expo app APIs
 - Node dev-session APIs for clone/install/expo-run/apply-and-push workflow
 - Workspace layout targets two apps: `mobile/` (Expo) and `expo-backend/` (Node API)
+- Runtime-owned API path: Expo app calls `expo-backend` directly; backend calls Shopify + per-project DB directly
+- Control-plane runtime sync model: config + encrypted secrets + outbox
 
 ## Key Endpoints
 
@@ -31,6 +33,8 @@ This is a brand-new SaaS prototype that matches your requested flow:
 - `POST /api/projects/:projectId/messages` - run prompt -> update Expo files + preview + optional GitHub commit
 - `GET /api/shopify/auth?shop=...&projectId=...` - build Shopify OAuth URL with signed state
 - `GET /api/shopify/callback` - verify HMAC/state -> exchange token -> securely store per project
+- `GET /api/projects/:projectId/runtime/sync` - inspect runtime sync state and outbox
+- `POST /api/projects/:projectId/runtime/sync` - force runtime sync dispatch for latest version
 - `GET /api/projects/:projectId/shopify/customer-auth/config` - resolve/store active customer auth strategy and endpoints
 - `POST /api/projects/:projectId/shopify/customer-auth/config` - set active customer auth strategy
 - `POST /api/projects/:projectId/shopify/customer-auth/start` - create Customer Account API session + OAuth URL
@@ -75,6 +79,10 @@ cp .env.example .env.local
 - Set `SUPABASE_SERVICE_ROLE_KEY`
 - Optional: set `SUPABASE_PROJECTS_TABLE` (defaults to `projects`)
 - Apply schema from `supabase/projects.sql` in your Supabase SQL editor
+- Runtime sync table envs:
+  - `SUPABASE_RUNTIME_CONFIG_TABLE` (default `project_runtime_config`)
+  - `SUPABASE_RUNTIME_SECRETS_TABLE` (default `project_runtime_secrets`)
+  - `SUPABASE_RUNTIME_SYNC_OUTBOX_TABLE` (default `runtime_sync_outbox`)
 - Set `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET`
 - Set `SHOPIFY_OAUTH_STATE_SECRET` and `SHOPIFY_TOKEN_ENCRYPTION_SECRET`
 - Optional Customer Account API vars for mobile customer login:
@@ -94,6 +102,11 @@ cp .env.example .env.local
   - `WORKSPACE_EXPO_BACKEND_PORT` (default `4100`)
 - Set `RUNNER_SERVER_BASE_URL` to your runner server (for example `http://localhost:3100`)
 - Set `RUNNER_SERVER_TOKEN` to match `RUNNER_SERVER_TOKEN` on the runner server
+- Set `RUNTIME_SYNC_TOKEN` (shared with runner/runtime backend)
+- Set Neon runtime provisioning envs:
+  - `NEON_ADMIN_DATABASE_URL`
+  - `NEON_RUNTIME_DATABASE_PREFIX` (optional)
+  - `NEON_RUNTIME_ROLE_PREFIX` (optional)
 - Set `EXPO_SCAFFOLD_SERVER_BASE_URL` if scaffold service runs on a different server
 - Set `EXPO_SCAFFOLD_SERVER_TOKEN` if scaffold token differs from runner token
 - Optional: switch provider/model via `LLM_PROVIDER` and `LLM_MODEL`
@@ -145,7 +158,7 @@ This keeps Vercel lightweight while long-running build/watch work stays on persi
 ## Notes
 
 - Shopify access tokens are encrypted before persisting in the local DB.
-- Generated Expo apps call their own workspace expo backend (`expo-backend/`), and that backend bridges to control-plane APIs.
+- Generated Expo apps call their own workspace expo backend (`expo-backend/`), and that backend serves API traffic directly (Shopify + per-project DB).
 - `LLM_PROVIDER=vertex-server` is the recommended mode for Vercel deployments.
 - `LLM_PROVIDER=rule-based` is still available as a fallback provider for development.
 - Workspace preview supports a quick in-app preview and a Snack web preview mode.

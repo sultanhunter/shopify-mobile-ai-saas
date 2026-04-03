@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { getProject } from "@/lib/db";
+import { getProjectRuntimeSecrets } from "@/lib/runtime-sync";
+import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
 import { fetchShopifyCatalog } from "@/lib/shopify-admin";
-import { decryptSecret } from "@/lib/secret-crypto";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -21,11 +22,10 @@ export async function GET(_: Request, { params }: Params) {
       return NextResponse.json({ error: "Project not found." }, { status: 404 });
     }
 
-    const shopDomain = project.store?.shopDomain?.trim().toLowerCase();
-    const accessTokenEncrypted = project.store?.accessTokenEncrypted;
-    const accessToken = accessTokenEncrypted
-      ? decryptSecret(accessTokenEncrypted)
-      : project.store?.accessToken;
+    const runtimeSecrets = await getProjectRuntimeSecrets(project.id);
+    const parsed = parseRuntimeSecrets(runtimeSecrets);
+    const shopDomain = parsed.shopify?.shopDomain?.trim().toLowerCase();
+    const accessToken = parsed.shopify?.adminAccessToken;
 
     if (!shopDomain || !accessToken) {
       return NextResponse.json({ error: "Shopify store is not connected." }, { status: 400 });

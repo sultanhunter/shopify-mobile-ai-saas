@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { getProject, updateProject } from "@/lib/db";
+import { getProject } from "@/lib/db";
 import {
   buildCustomerAuthorizeUrl,
   createCustomerAuthState,
   createPkcePair,
-  getCustomerAuthCallbackUrl,
   normalizeCustomerApiScopes,
 } from "@/lib/shopify-customer-auth";
+import { createRuntimeCustomerAuthSession, runRuntimeProjectMigrations } from "@/lib/project-runtime-db";
+import { getProjectRuntimeSecrets } from "@/lib/runtime-sync";
+import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -18,22 +20,27 @@ interface Params {
   };
 }
 
-export async function POST(request: Request, { params }: Params) {
+export async function POST(_: Request, { params }: Params) {
   try {
     const project = await getProject(params.projectId);
     if (!project) {
       return NextResponse.json({ error: "Project not found." }, { status: 404 });
     }
 
-    const shopDomain = project.store?.shopDomain?.trim().toLowerCase();
-    const auth = project.store?.customerAuth;
-    if (!shopDomain || !auth) {
+    const runtimeSecrets = await getProjectRuntimeSecrets(project.id);
+    const parsed = parseRuntimeSecrets(runtimeSecrets);
+
+    const shopDomain = parsed.shopify?.shopDomain?.trim().toLowerCase();
+    const auth = parsed.shopify?.customerAuth;
+    const runtimeDatabaseUrl = parsed.runtime?.database?.databaseUrl;
+
+    if (!shopDomain || !auth || !runtimeDatabaseUrl) {
       return NextResponse.json({ error: "Shopify customer auth is not configured." }, { status: 400 });
     }
 
     const clientId = auth.customerAccountApi.clientId;
     const authorizationEndpoint = auth.customerAccountApi.authorizationEndpoint;
-    const callbackUrl = getCustomerAuthCallbackUrl(new URL(request.url).origin);
+    const callbackUrl = auth.customerAccountApi.callbackUrl;
     const normalizedScopes = normalizeCustomerApiScopes(auth.customerAccountApi.scopes);
     if (!auth.customerAccountApi.enabled || !clientId || !authorizationEndpoint || !callbackUrl) {
       return NextResponse.json(
@@ -55,6 +62,8 @@ export async function POST(request: Request, { params }: Params) {
       );
     }
 
+    await runRuntimeProjectMigrations(runtimeDatabaseUrl).catch(() => null);
+
     const sessionId = randomUUID();
     const sessionExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     const pkce = createPkcePair();
@@ -73,37 +82,11 @@ export async function POST(request: Request, { params }: Params) {
       codeChallenge: pkce.codeChallenge,
     });
 
-    await updateProject(project.id, (current) => {
-      const now = new Date().toISOString();
-      const existingSessions = current.store?.customerAuth?.sessions ?? [];
-      const sessions = [...existingSessions, {
-        id: sessionId,
-        status: "pending" as const,
-        createdAt: now,
-        updatedAt: now,
-        expiresAt: sessionExpiresAt,
-        codeVerifier: pkce.codeVerifier,
-      }].slice(-20);
-
-      return {
-        ...current,
-        updatedAt: now,
-        store: current.store
-          ? {
-              ...current.store,
-              customerAuth: current.store.customerAuth
-                ? {
-                    ...current.store.customerAuth,
-                    customerAccountApi: {
-                      ...current.store.customerAuth.customerAccountApi,
-                      scopes: normalizedScopes,
-                    },
-                    sessions,
-                  }
-                : current.store.customerAuth,
-            }
-          : current.store,
-      };
+    await createRuntimeCustomerAuthSession({
+      databaseUrl: runtimeDatabaseUrl,
+      sessionId,
+      codeVerifier: pkce.codeVerifier,
+      expiresAt: sessionExpiresAt,
     });
 
     return NextResponse.json({
