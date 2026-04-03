@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { ThemeToggle } from "@/components/theme-toggle";
+import { MobilePreview } from "@/components/workspace/mobile-preview";
 import { ChatMessage, DevSessionState, PublicProject } from "@/lib/models";
 
 interface WorkspaceClientProps {
@@ -13,6 +13,7 @@ interface WorkspaceClientProps {
 
 type ThinkingMode = "low" | "medium" | "high" | "xHigh";
 type CodeViewerScope = "expo" | "backend";
+type RightWorkspaceTab = "preview" | "code" | "runtime" | "store" | "logs";
 
 const LLM_MODEL_OPTIONS = ["gpt-5.4"];
 const THINKING_MODE_OPTIONS: ThinkingMode[] = ["low", "medium", "high", "xHigh"];
@@ -72,6 +73,8 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const [storeDomain, setStoreDomain] = useState(initialProject.store?.shopDomain ?? "");
   const [selectedModel, setSelectedModel] = useState(LLM_MODEL_OPTIONS[0]);
   const [selectedThinking, setSelectedThinking] = useState<ThinkingMode>("medium");
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<RightWorkspaceTab>("preview");
+  const [codeViewerScope, setCodeViewerScope] = useState<CodeViewerScope>("expo");
   const [isSendingPrompt, setIsSendingPrompt] = useState(false);
   const [isConnectingStore, setIsConnectingStore] = useState(false);
   const [isStartingDevSession, setIsStartingDevSession] = useState(false);
@@ -83,8 +86,6 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const [devSessionError, setDevSessionError] = useState<string | null>(null);
   const [streamedResponse, setStreamedResponse] = useState("");
   const [streamEvents, setStreamEvents] = useState<string[]>([]);
-  const [showCodeViewer, setShowCodeViewer] = useState(false);
-  const [codeViewerScope, setCodeViewerScope] = useState<CodeViewerScope>("expo");
   const [repoFiles, setRepoFiles] = useState<string[]>(initialProject.fileIndex ?? []);
   const [selectedCodeFile, setSelectedCodeFile] = useState("");
   const [isLoadingCode, setIsLoadingCode] = useState(false);
@@ -109,10 +110,12 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
     () => project.messages.filter((message) => !isOperationalMessage(message)).slice(-24),
     [project.messages]
   );
+
   const projectActivityLogs = useMemo(
-    () => project.messages.filter(isOperationalMessage).map(formatLogLine).slice(-60),
+    () => project.messages.filter(isOperationalMessage).map(formatLogLine).slice(-80),
     [project.messages]
   );
+
   const liveStreamLines = useMemo(() => {
     const lines: string[] = [];
 
@@ -136,7 +139,6 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   }, [devSession?.expoUrl, devSession?.status]);
 
   const branchName = project.github.defaultBranch ?? "main";
-  const customerApiNeedsClientId = Boolean(customerAuth && !customerAuth.customerAccountApi.hasClientId);
   const customerApiHasClientId = Boolean(customerAuth?.customerAccountApi.hasClientId);
   const mobileCodeRoot = useMemo(
     () => normalizeWorkspaceDir(project.workspaceLayout?.mobileAppDir, "mobile"),
@@ -168,6 +170,15 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   }, [backendCodeRoot, repoFiles]);
 
   const visibleCodeFiles = codeViewerScope === "expo" ? expoCodeFiles : backendCodeFiles;
+  const runtimeBackendUrl = devSession?.expoBackendUrl ?? devSession?.backendUrl;
+
+  const workspaceTabs: Array<{ id: RightWorkspaceTab; label: string; glyph: string }> = [
+    { id: "preview", label: "Preview", glyph: "PV" },
+    { id: "code", label: "Code", glyph: "CD" },
+    { id: "runtime", label: "Runtime", glyph: "RT" },
+    { id: "store", label: "Store", glyph: "ST" },
+    { id: "logs", label: "Logs", glyph: "LG" }
+  ];
 
   const refreshProject = useCallback(async () => {
     const response = await fetch(`/api/projects/${project.id}`, { cache: "no-store" });
@@ -202,7 +213,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   }, [project.id]);
 
   useEffect(() => {
-    if (!showCodeViewer) {
+    if (activeWorkspaceTab !== "code") {
       return;
     }
 
@@ -216,10 +227,10 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
     if (!selectedCodeFile || !visibleCodeFiles.includes(selectedCodeFile)) {
       setSelectedCodeFile(visibleCodeFiles[0]);
     }
-  }, [selectedCodeFile, showCodeViewer, visibleCodeFiles]);
+  }, [activeWorkspaceTab, selectedCodeFile, visibleCodeFiles]);
 
   useEffect(() => {
-    if (!showCodeViewer || !selectedCodeFile) {
+    if (activeWorkspaceTab !== "code" || !selectedCodeFile) {
       setCodeContent("");
       setCodeError(null);
       setIsBinaryCode(false);
@@ -271,13 +282,53 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
     return () => {
       cancelled = true;
     };
-  }, [project.id, selectedCodeFile, showCodeViewer]);
+  }, [activeWorkspaceTab, project.id, selectedCodeFile]);
 
-  const openCodeViewer = useCallback((scope: CodeViewerScope) => {
-    setCodeViewerScope(scope);
-    setShowCodeViewer(true);
-    setCodeError(null);
-  }, []);
+  const refreshDevSession = useCallback(
+    async (withSpinner = true) => {
+      if (!project.devSession?.id) {
+        return;
+      }
+
+      if (withSpinner) {
+        setIsRefreshingDevSession(true);
+      }
+
+      setDevSessionError(null);
+
+      try {
+        const response = await fetch(`/api/projects/${project.id}/dev-session/status?logLines=200`, {
+          cache: "no-store"
+        });
+
+        const payload = (await response.json()) as { project?: PublicProject; error?: string };
+        if (!response.ok || !payload.project) {
+          throw new Error(payload.error ?? "Failed to refresh dev session.");
+        }
+
+        setProject(payload.project);
+      } catch (caught) {
+        setDevSessionError(caught instanceof Error ? caught.message : "Failed to refresh dev session.");
+      } finally {
+        if (withSpinner) {
+          setIsRefreshingDevSession(false);
+        }
+      }
+    },
+    [project.devSession?.id, project.id]
+  );
+
+  useEffect(() => {
+    if (!devSession || (devSession.status !== "starting" && devSession.status !== "ready")) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      void refreshDevSession(false);
+    }, 4000);
+
+    return () => clearInterval(timer);
+  }, [devSession, refreshDevSession]);
 
   async function connectStoreWithOAuth() {
     const normalizedDomain = storeDomain.trim();
@@ -289,9 +340,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
     setError(null);
 
     try {
-      const response = await fetch(
-        `/api/shopify/auth?shop=${encodeURIComponent(normalizedDomain)}&projectId=${encodeURIComponent(project.id)}`
-      );
+      const response = await fetch(`/api/shopify/auth?shop=${encodeURIComponent(normalizedDomain)}&projectId=${encodeURIComponent(project.id)}`);
 
       const payload = (await response.json()) as { authUrl?: string; error?: string };
       if (!response.ok || !payload.authUrl) {
@@ -339,52 +388,6 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
       setIsSavingCustomerClientId(false);
     }
   }
-
-  const refreshDevSession = useCallback(
-    async (withSpinner = true) => {
-      if (!project.devSession?.id) {
-        return;
-      }
-
-      if (withSpinner) {
-        setIsRefreshingDevSession(true);
-      }
-
-      setDevSessionError(null);
-
-      try {
-        const response = await fetch(`/api/projects/${project.id}/dev-session/status?logLines=200`, {
-          cache: "no-store"
-        });
-
-        const payload = (await response.json()) as { project?: PublicProject; error?: string };
-        if (!response.ok || !payload.project) {
-          throw new Error(payload.error ?? "Failed to refresh dev session.");
-        }
-
-        setProject(payload.project);
-      } catch (caught) {
-        setDevSessionError(caught instanceof Error ? caught.message : "Failed to refresh dev session.");
-      } finally {
-        if (withSpinner) {
-          setIsRefreshingDevSession(false);
-        }
-      }
-    },
-    [project.devSession?.id, project.id]
-  );
-
-  useEffect(() => {
-    if (!devSession || (devSession.status !== "starting" && devSession.status !== "ready")) {
-      return;
-    }
-
-    const timer = setInterval(() => {
-      void refreshDevSession(false);
-    }, 4000);
-
-    return () => clearInterval(timer);
-  }, [devSession, refreshDevSession]);
 
   async function submitPrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -578,9 +581,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
       setProject(payload.project);
       setDevSessionFeedback(
-        payload.committed
-          ? `Pushed ${payload.commitSha ? payload.commitSha.slice(0, 12) : "latest updates"}.`
-          : "No file changes to commit."
+        payload.committed ? `Pushed ${payload.commitSha ? payload.commitSha.slice(0, 12) : "latest updates"}.` : "No file changes to commit."
       );
       void refreshRepoFiles();
     } catch (caught) {
@@ -595,125 +596,39 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   }
 
   return (
-    <div className="workspace-shell">
-      <section className="chat-column">
-        <div className="panel-head">
-          <div className="panel-head-top">
-            <Link className="back-link" href="/">
-              Back to projects
-            </Link>
-            <div className="workspace-head-tools">
-              <p className="workspace-id">Workspace {project.id.slice(0, 8)}</p>
-              <ThemeToggle />
-            </div>
+    <div className="workspace-v2">
+      <section className="workspace-chat-pane">
+        <div className="workspace-chat-head">
+          <div>
+            <p className="workspace-brandline">Shopify Mobile Studio</p>
+            <h1 className="workspace-title">{project.name}</h1>
+            <p className="workspace-subtitle">AI prompt-first workspace. Tools and runtime tabs are on the right.</p>
           </div>
-          <h1 className="panel-title">{project.name}</h1>
-          <p className="panel-subtitle">AI co-builder with runtime sync, Expo backend control, and live operational logs.</p>
-          <div className="status-row">
-            <span className="status-tag">Expo SDK {project.expoSdk ?? "unknown"}</span>
-            <span className="status-tag">Session {devSession?.status ?? "idle"}</span>
-            <span className="status-tag">Store {project.store?.connectedAt ? "connected" : "pending"}</span>
-            <span className="status-tag">Files {repoFiles.length}</span>
-          </div>
+          <Link className="back-link" href="/">
+            Back
+          </Link>
         </div>
 
-        <div className="connect-row">
-          <p className="section-kicker">Store connection</p>
-          <label className="field-label" htmlFor="storeDomainInput">
-            Shopify Store Domain
-          </label>
-          <input
-            id="storeDomainInput"
-            className="text-input"
-            placeholder="your-shop.myshopify.com"
-            value={storeDomain}
-            onChange={(event) => setStoreDomain(event.target.value)}
-          />
-          <button className="button" disabled={isConnectingStore} onClick={connectStoreWithOAuth} type="button">
-            {isConnectingStore ? "Redirecting..." : "Connect via OAuth"}
-          </button>
-          {oauthStatus === "success" ? (
-            <p className="meta-line">Shopify OAuth connected{oauthShop ? `: ${oauthShop}` : ""}.</p>
-          ) : null}
-          {oauthStatus === "error" ? (
-            <p className="error-text">
-              Shopify OAuth failed{oauthReason ? ` (${oauthReason.replaceAll("_", " ")})` : ""}
-              {oauthDetail ? ` - ${oauthDetail.replaceAll("_", " ")}` : ""}. Try again.
-            </p>
-          ) : null}
-          {customerAuth ? (
-            <p className="meta-line">
-              Customer auth: active `{customerAuth.activeMethod}`; recommended `{customerAuth.recommendedMethod}`.
-            </p>
-          ) : null}
-          {customerAuth?.hosted ? (
-            <p className="meta-line">
-              Hosted accounts: {customerAuth.hosted.accountsEnabled ? customerAuth.hosted.accountType : "disabled"};
-              Customer API: {customerAuth.customerAccountApi.enabled ? "available" : "unavailable"}.
-            </p>
-          ) : null}
-          {customerAuth ? (
-            <>
-              <p className="meta-line">
-                Customer Account API client ID: {customerApiHasClientId ? "configured" : "missing"}.
-              </p>
-              {customerApiNeedsClientId ? (
-                <p className="meta-line">Paste the store Customer Account API client ID to enable customer OAuth.</p>
-              ) : (
-                <p className="meta-line">If sign-in fails, paste a new client ID here to replace the current one.</p>
-              )}
-              <input
-                className="text-input"
-                placeholder="Customer Account API client ID"
-                value={customerClientIdInput}
-                onChange={(event) => setCustomerClientIdInput(event.target.value)}
-              />
-              <button
-                className="button"
-                type="button"
-                disabled={isSavingCustomerClientId || !customerClientIdInput.trim()}
-                onClick={saveCustomerClientId}
-              >
-                {isSavingCustomerClientId
-                  ? "Saving..."
-                  : customerApiHasClientId
-                    ? "Update Customer Client ID"
-                    : "Save Customer Client ID"}
-              </button>
-            </>
-          ) : null}
-          {customerClientIdFeedback ? <p className="meta-line">{customerClientIdFeedback}</p> : null}
-        </div>
-
-        <div className="chat-main">
-          <div className="messages chat-history">
-            {visibleMessages.length > 0 ? (
-              visibleMessages.map((message) => (
-                <div className={`msg msg-${message.role}`} key={message.id}>
-                  {message.content}
-                </div>
-              ))
-            ) : (
-              <p className="meta-line">No chat replies yet. Project activity logs are shown in the right panel.</p>
-            )}
-          </div>
+        <div className="workspace-chat-history">
+          {visibleMessages.length > 0 ? (
+            visibleMessages.map((message) => (
+              <div className={`msg msg-${message.role}`} key={message.id}>
+                {message.content}
+              </div>
+            ))
+          ) : (
+            <p className="meta-line">No chat replies yet. Send a prompt to start building.</p>
+          )}
 
           <div className={`run-meta live-stream-panel ${isSendingPrompt ? "streaming-active" : ""}`}>
             <h3>Live AI Stream</h3>
-            <div className="log-console live-stream-console">
-              {liveStreamLines.length > 0 ? liveStreamLines.join("\n\n") : "Awaiting streamed response..."}
-            </div>
+            <div className="log-console live-stream-console">{liveStreamLines.length > 0 ? liveStreamLines.join("\n\n") : "Awaiting streamed response..."}</div>
           </div>
         </div>
 
-        <form className="composer" onSubmit={submitPrompt}>
-          <textarea
-            className="text-area"
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            placeholder="Build a Shopify loyalty flow with points wallet and order tracking timeline."
-          />
-          <div className="composer-controls">
+        <form className="workspace-composer" onSubmit={submitPrompt}>
+          <textarea className="text-area" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Keep building" />
+          <div className="workspace-composer-row">
             <select className="text-input" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}>
               {LLM_MODEL_OPTIONS.map((model) => (
                 <option key={model} value={model}>
@@ -721,139 +636,248 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
                 </option>
               ))}
             </select>
-            <select
-              className="text-input"
-              value={selectedThinking}
-              onChange={(event) => setSelectedThinking(event.target.value as ThinkingMode)}
-            >
+            <select className="text-input" value={selectedThinking} onChange={(event) => setSelectedThinking(event.target.value as ThinkingMode)}>
               {THINKING_MODE_OPTIONS.map((mode) => (
                 <option key={mode} value={mode}>
                   {`Thinking: ${mode}`}
                 </option>
               ))}
             </select>
+            <button className="button" disabled={isSendingPrompt} type="submit">
+              {isSendingPrompt ? "Streaming..." : "Send Prompt"}
+            </button>
           </div>
           {error ? <p className="error-text">{error}</p> : null}
-          <button className="button" disabled={isSendingPrompt} type="submit">
-            {isSendingPrompt ? "Streaming..." : "Send Prompt"}
-          </button>
         </form>
       </section>
 
-      <aside className="preview-column">
-        <div className="run-meta">
-          <p className="section-kicker">Runtime controls</p>
-          <h3>Global Console</h3>
-          <p className="meta-line">Status: {devSession ? getDevSessionStatusLabel(devSession) : "not running"}</p>
-          {(devSession?.expoBackendStatus ?? devSession?.backendStatus) ? (
-            <p className="meta-line">Expo backend: {devSession?.expoBackendStatus ?? devSession?.backendStatus}</p>
-          ) : null}
-          {(devSession?.expoBackendUrl ?? devSession?.backendUrl) ? (
-            <p className="meta-line">
-              Expo backend URL: <a href={devSession?.expoBackendUrl ?? devSession?.backendUrl}>{devSession?.expoBackendUrl ?? devSession?.backendUrl}</a>
-            </p>
-          ) : null}
-          <div className="inline-grid">
-            <button className="button" disabled={isStartingDevSession || hasActiveDevSession} onClick={startDevSession} type="button">
-              {isStartingDevSession ? "Starting..." : "Start Session"}
-            </button>
-            <button
-              className="button"
-              disabled={!devSession || isRefreshingDevSession}
-              onClick={() => refreshDevSession(true)}
-              type="button"
-            >
-              {isRefreshingDevSession ? "Refreshing..." : "Refresh"}
-            </button>
-            <button
-              className="button"
-              disabled={!devSession || isCommittingDevSession}
-              onClick={commitDevSessionChanges}
-              type="button"
-            >
-              {isCommittingDevSession ? "Committing..." : "Commit Changes"}
-            </button>
-            <button
-              className="button"
-              disabled={!devSession || isStoppingDevSession || devSession.status === "stopped"}
-              onClick={stopDevSession}
-              type="button"
-            >
-              {isStoppingDevSession ? "Stopping..." : "Stop"}
-            </button>
+      <section className="workspace-main-pane">
+        <header className="workspace-main-topbar">
+          <div className="workspace-topbar-left">
+            <span className="status-light" />
+            <p>Session: {devSession ? getDevSessionStatusLabel(devSession) : "idle"}</p>
           </div>
-          <div className="inline-grid">
-            <button className="button" type="button" disabled={expoCodeFiles.length === 0} onClick={() => openCodeViewer("expo")}>
-              Expo Code
-            </button>
-            <button className="button" type="button" disabled={backendCodeFiles.length === 0} onClick={() => openCodeViewer("backend")}>
-              Backend Code
-            </button>
-            {showCodeViewer ? (
-              <button className="button" type="button" onClick={() => setShowCodeViewer(false)}>
-                Hide Code
+          <div className="workspace-topbar-right">
+            <p className="meta-line">Store: {project.store?.connectedAt ? "connected" : "not connected"}</p>
+            <p className="meta-line">Workspace {project.id.slice(0, 8)}</p>
+          </div>
+        </header>
+
+        <div className="workspace-main-body">
+          <nav className="workspace-tool-rail">
+            {workspaceTabs.map((tab) => (
+              <button
+                className={`tool-tab ${activeWorkspaceTab === tab.id ? "tool-tab-active" : ""}`}
+                key={tab.id}
+                onClick={() => setActiveWorkspaceTab(tab.id)}
+                type="button"
+              >
+                <span className="tool-tab-glyph">{tab.glyph}</span>
+                <span>{tab.label}</span>
               </button>
-            ) : null}
-          </div>
-          {devSessionFeedback ? <p className="meta-line">{devSessionFeedback}</p> : null}
-          {devSessionError ? <p className="error-text">{devSessionError}</p> : null}
-          {devSession?.error ? <p className="error-text">Runner: {devSession.error}</p> : null}
-          <details className="log-details" open>
-            <summary>Project activity logs</summary>
-            <div className="log-console">{projectActivityLogs.length ? projectActivityLogs.join("\n") : "No project activity yet."}</div>
-          </details>
-          <div className="log-console">{devSession?.logs?.length ? devSession.logs.join("\n") : "No mobile dev logs yet."}</div>
-          <details className="log-details">
-            <summary>Expo backend logs</summary>
-            <div className="log-console">
-              {(devSession?.expoBackendLogs ?? devSession?.backendLogs)?.length
-                ? (devSession?.expoBackendLogs ?? devSession?.backendLogs)?.join("\n")
-                : "No expo backend logs yet."}
-            </div>
-          </details>
-        </div>
+            ))}
+          </nav>
 
-        {showCodeViewer ? (
-          <div className="run-meta">
-            <h3>{codeViewerScope === "expo" ? "Expo Repository Code" : "Backend Repository Code"}</h3>
-            <p className="meta-line">Branch: {branchName}</p>
-            <select
-              className="text-input"
-              value={selectedCodeFile}
-              onChange={(event) => setSelectedCodeFile(event.target.value)}
-              disabled={visibleCodeFiles.length === 0}
-            >
-              {visibleCodeFiles.length === 0 ? <option value="">No files available</option> : null}
-              {visibleCodeFiles.map((filePath) => (
-                <option key={filePath} value={filePath}>
-                  {filePath}
-                </option>
-              ))}
-            </select>
-            {codeError ? <p className="error-text">{codeError}</p> : null}
-            <div className="log-console code-console">
-              {isLoadingCode
-                ? "Loading file..."
-                : isBinaryCode
-                  ? "Binary file preview is not supported in viewer."
-                  : codeContent || "No file selected."}
+          <div className="workspace-tab-wrap">
+            <div className="workspace-tab-toolbar">
+              {activeWorkspaceTab === "preview" ? (
+                <>
+                  <div className="toolbar-pills">
+                    <span className="toolbar-pill toolbar-pill-active">iOS</span>
+                    <span className="toolbar-pill">Web</span>
+                    <span className="toolbar-pill">Simulator</span>
+                  </div>
+                  <button
+                    className="toolbar-button"
+                    disabled={!devSession?.expoUrl}
+                    onClick={() => {
+                      if (devSession?.expoUrl) {
+                        window.open(devSession.expoUrl, "_blank", "noopener,noreferrer");
+                      }
+                    }}
+                    type="button"
+                  >
+                    Open on mobile
+                  </button>
+                </>
+              ) : (
+                <>
+                  <h3 className="workspace-tab-title">{workspaceTabs.find((tab) => tab.id === activeWorkspaceTab)?.label}</h3>
+                  <p className="meta-line">Branch: {branchName}</p>
+                </>
+              )}
+            </div>
+
+            <div className="workspace-tab-content">
+              {activeWorkspaceTab === "preview" ? (
+                <div className="preview-workbench">
+                  <div className="preview-device-stage">
+                    <MobilePreview preview={project.preview} />
+                  </div>
+                  <aside className="preview-side-card">
+                    <p className="meta-line">Expo backend: {devSession?.expoBackendStatus ?? devSession?.backendStatus ?? "not running"}</p>
+                    {runtimeBackendUrl ? (
+                      <p className="meta-line">
+                        Backend URL: <a href={runtimeBackendUrl}>{runtimeBackendUrl}</a>
+                      </p>
+                    ) : null}
+                    <div className="inline-grid">
+                      <button className="button" disabled={isStartingDevSession || hasActiveDevSession} onClick={startDevSession} type="button">
+                        {isStartingDevSession ? "Starting..." : "Start"}
+                      </button>
+                      <button className="button" disabled={!devSession || isRefreshingDevSession} onClick={() => refreshDevSession(true)} type="button">
+                        {isRefreshingDevSession ? "Refreshing..." : "Refresh"}
+                      </button>
+                    </div>
+                    {expoQrUrl ? (
+                      <div className="expo-qr-wrap">
+                        <Image alt="Expo Go QR code" className="expo-qr" height={220} src={expoQrUrl} width={220} />
+                        <p className="meta-line">Scan with Expo Go</p>
+                      </div>
+                    ) : (
+                      <p className="meta-line">Start dev session to view live app on device.</p>
+                    )}
+                  </aside>
+                </div>
+              ) : null}
+
+              {activeWorkspaceTab === "code" ? (
+                <div className="run-meta">
+                  <div className="inline-grid">
+                    <button
+                      className="button"
+                      type="button"
+                      onClick={() => {
+                        setCodeViewerScope("expo");
+                        setActiveWorkspaceTab("code");
+                      }}
+                    >
+                      Expo Files
+                    </button>
+                    <button
+                      className="button"
+                      type="button"
+                      onClick={() => {
+                        setCodeViewerScope("backend");
+                        setActiveWorkspaceTab("code");
+                      }}
+                    >
+                      Backend Files
+                    </button>
+                  </div>
+                  <select className="text-input" value={selectedCodeFile} onChange={(event) => setSelectedCodeFile(event.target.value)}>
+                    {visibleCodeFiles.length === 0 ? <option value="">No files available</option> : null}
+                    {visibleCodeFiles.map((filePath) => (
+                      <option key={filePath} value={filePath}>
+                        {filePath}
+                      </option>
+                    ))}
+                  </select>
+                  {codeError ? <p className="error-text">{codeError}</p> : null}
+                  <div className="log-console code-console">
+                    {isLoadingCode
+                      ? "Loading file..."
+                      : isBinaryCode
+                        ? "Binary file preview is not supported in viewer."
+                        : codeContent || "No file selected."}
+                  </div>
+                </div>
+              ) : null}
+
+              {activeWorkspaceTab === "runtime" ? (
+                <div className="run-meta">
+                  <p className="meta-line">Status: {devSession ? getDevSessionStatusLabel(devSession) : "not running"}</p>
+                  {devSessionFeedback ? <p className="meta-line">{devSessionFeedback}</p> : null}
+                  {devSessionError ? <p className="error-text">{devSessionError}</p> : null}
+                  {devSession?.error ? <p className="error-text">Runner: {devSession.error}</p> : null}
+                  <div className="inline-grid">
+                    <button className="button" disabled={isStartingDevSession || hasActiveDevSession} onClick={startDevSession} type="button">
+                      {isStartingDevSession ? "Starting..." : "Start Session"}
+                    </button>
+                    <button className="button" disabled={!devSession || isRefreshingDevSession} onClick={() => refreshDevSession(true)} type="button">
+                      {isRefreshingDevSession ? "Refreshing..." : "Refresh Status"}
+                    </button>
+                    <button className="button" disabled={!devSession || isCommittingDevSession} onClick={commitDevSessionChanges} type="button">
+                      {isCommittingDevSession ? "Committing..." : "Commit Changes"}
+                    </button>
+                    <button className="button" disabled={!devSession || isStoppingDevSession || devSession.status === "stopped"} onClick={stopDevSession} type="button">
+                      {isStoppingDevSession ? "Stopping..." : "Stop Session"}
+                    </button>
+                  </div>
+                  <div className="log-console">{devSession?.logs?.length ? devSession.logs.join("\n") : "No mobile dev logs yet."}</div>
+                </div>
+              ) : null}
+
+              {activeWorkspaceTab === "store" ? (
+                <div className="run-meta">
+                  <label className="field-label" htmlFor="storeDomainInput">
+                    Shopify Store Domain
+                  </label>
+                  <input
+                    id="storeDomainInput"
+                    className="text-input"
+                    placeholder="your-shop.myshopify.com"
+                    value={storeDomain}
+                    onChange={(event) => setStoreDomain(event.target.value)}
+                  />
+                  <button className="button" disabled={isConnectingStore} onClick={connectStoreWithOAuth} type="button">
+                    {isConnectingStore ? "Redirecting..." : "Connect via OAuth"}
+                  </button>
+                  {oauthStatus === "success" ? <p className="meta-line">Shopify OAuth connected{oauthShop ? `: ${oauthShop}` : ""}.</p> : null}
+                  {oauthStatus === "error" ? (
+                    <p className="error-text">
+                      Shopify OAuth failed{oauthReason ? ` (${oauthReason.replaceAll("_", " ")})` : ""}
+                      {oauthDetail ? ` - ${oauthDetail.replaceAll("_", " ")}` : ""}. Try again.
+                    </p>
+                  ) : null}
+                  {customerAuth ? <p className="meta-line">Customer auth method: {customerAuth.activeMethod}</p> : null}
+                  {customerAuth ? <p className="meta-line">Customer Account API client ID: {customerApiHasClientId ? "configured" : "missing"}</p> : null}
+                  {customerAuth ? (
+                    <>
+                      <input
+                        className="text-input"
+                        placeholder="Customer Account API client ID"
+                        value={customerClientIdInput}
+                        onChange={(event) => setCustomerClientIdInput(event.target.value)}
+                      />
+                      <button
+                        className="button"
+                        type="button"
+                        disabled={isSavingCustomerClientId || !customerClientIdInput.trim()}
+                        onClick={saveCustomerClientId}
+                      >
+                        {isSavingCustomerClientId ? "Saving..." : "Save Customer Client ID"}
+                      </button>
+                    </>
+                  ) : null}
+                  {customerClientIdFeedback ? <p className="meta-line">{customerClientIdFeedback}</p> : null}
+                </div>
+              ) : null}
+
+              {activeWorkspaceTab === "logs" ? (
+                <div className="run-meta">
+                  <details className="log-details" open>
+                    <summary>Project activity logs</summary>
+                    <div className="log-console">{projectActivityLogs.length ? projectActivityLogs.join("\n") : "No project activity yet."}</div>
+                  </details>
+                  <details className="log-details" open>
+                    <summary>Mobile dev logs</summary>
+                    <div className="log-console">{devSession?.logs?.length ? devSession.logs.join("\n") : "No mobile dev logs yet."}</div>
+                  </details>
+                  <details className="log-details" open>
+                    <summary>Expo backend logs</summary>
+                    <div className="log-console">
+                      {(devSession?.expoBackendLogs ?? devSession?.backendLogs)?.length
+                        ? (devSession?.expoBackendLogs ?? devSession?.backendLogs)?.join("\n")
+                        : "No expo backend logs yet."}
+                    </div>
+                  </details>
+                </div>
+              ) : null}
             </div>
           </div>
-        ) : null}
-
-        <div className="preview-stage">
-          <div className="preview-canvas">
-            {expoQrUrl ? (
-              <div className="expo-qr-wrap">
-                <Image alt="Expo Go QR code" className="expo-qr" height={300} src={expoQrUrl} width={300} />
-                <p className="meta-line">Scan with Expo Go</p>
-              </div>
-            ) : (
-              <p className="meta-line">Start/refresh dev session until QR appears.</p>
-            )}
-          </div>
         </div>
-      </aside>
+      </section>
     </div>
   );
 }
