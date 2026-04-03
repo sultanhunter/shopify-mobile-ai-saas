@@ -12,6 +12,7 @@ function buildWorkspaceRedirect(request: NextRequest, params: {
   projectId?: string;
   status: "success" | "error";
   reason?: string;
+  detail?: string;
   shop?: string;
 }) {
   const appBaseUrl = getAppBaseUrl(request.nextUrl.origin);
@@ -27,17 +28,49 @@ function buildWorkspaceRedirect(request: NextRequest, params: {
     url.searchParams.set("reason", params.reason);
   }
 
+  if (params.detail) {
+    url.searchParams.set("detail", params.detail);
+  }
+
   return url;
 }
 
-function mapStoreConnectFailureReason(error: unknown): string {
-  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+function mapStoreConnectFailure(error: unknown): { reason: string; detail?: string } {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
 
-  if (message.includes("runtime database") || message.includes("runtime db") || message.includes("provision")) {
-    return "runtime_db_provision_failed";
+  if (message.includes("not neon pooler") || message.includes("direct postgres host") || message.includes("pooler")) {
+    return { reason: "runtime_db_admin_url_invalid", detail: "use_direct_db_host_not_pooler" };
   }
 
-  return "store_connect_failed";
+  if (message.includes("is required") && message.includes("runtime_admin_database_url")) {
+    return { reason: "runtime_db_admin_url_missing", detail: "set_runner_runtime_admin_database_url" };
+  }
+
+  if (message.includes("missing createdb")) {
+    return { reason: "runtime_db_admin_permissions_missing", detail: "admin_user_missing_createdb" };
+  }
+
+  if (message.includes("missing createrole")) {
+    return { reason: "runtime_db_admin_permissions_missing", detail: "admin_user_missing_createrole" };
+  }
+
+  if (message.includes("password authentication failed")) {
+    return { reason: "runtime_db_admin_auth_failed", detail: "check_admin_db_password" };
+  }
+
+  if (message.includes("getaddrinfo") || message.includes("enotfound") || message.includes("timed out")) {
+    return { reason: "runtime_db_admin_unreachable", detail: "check_db_host_network_dns" };
+  }
+
+  if (message.includes("runtime db provisioning failed at")) {
+    return { reason: "runtime_db_provision_failed", detail: "check_runner_logs_for_stage" };
+  }
+
+  if (message.includes("runtime database") || message.includes("runtime db") || message.includes("provision")) {
+    return { reason: "runtime_db_provision_failed" };
+  }
+
+  return { reason: "store_connect_failed" };
 }
 
 export async function GET(request: NextRequest) {
@@ -84,7 +117,8 @@ export async function GET(request: NextRequest) {
       code
     });
     accessToken = tokenResult.accessToken;
-  } catch {
+  } catch (error) {
+    console.error("[SHOPIFY_CALLBACK_TOKEN_EXCHANGE_FAILED]", error);
     return NextResponse.redirect(
       buildWorkspaceRedirect(request, {
         projectId: oauthState.projectId,
@@ -111,11 +145,13 @@ export async function GET(request: NextRequest) {
     );
   } catch (error) {
     console.error("[SHOPIFY_CALLBACK_CONNECT_STORE_FAILED]", error);
+    const mapped = mapStoreConnectFailure(error);
     return NextResponse.redirect(
       buildWorkspaceRedirect(request, {
         projectId: oauthState.projectId,
         status: "error",
-        reason: mapStoreConnectFailureReason(error),
+        reason: mapped.reason,
+        detail: mapped.detail,
         shop
       })
     );

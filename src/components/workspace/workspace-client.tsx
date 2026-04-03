@@ -95,6 +95,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const oauthStatus = searchParams.get("shopify_oauth");
   const oauthShop = searchParams.get("shop");
   const oauthReason = searchParams.get("reason");
+  const oauthDetail = searchParams.get("detail");
 
   const latestRun = project.runs[0];
   const devSession = project.devSession;
@@ -620,7 +621,8 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
           ) : null}
           {oauthStatus === "error" ? (
             <p className="error-text">
-              Shopify OAuth failed{oauthReason ? ` (${oauthReason.replaceAll("_", " ")})` : ""}. Try again.
+              Shopify OAuth failed{oauthReason ? ` (${oauthReason.replaceAll("_", " ")})` : ""}
+              {oauthDetail ? ` - ${oauthDetail.replaceAll("_", " ")}` : ""}. Try again.
             </p>
           ) : null}
           {customerAuth ? (
