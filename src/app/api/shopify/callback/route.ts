@@ -37,6 +37,8 @@ function buildWorkspaceRedirect(request: NextRequest, params: {
 
 function mapStoreConnectFailure(error: unknown): { reason: string; detail?: string } {
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  const stageMatch = message.match(/runtime db provisioning failed at ([a-z_]+):/);
+  const stage = stageMatch?.[1];
 
   if (message.includes("not neon pooler") || message.includes("direct postgres host") || message.includes("pooler")) {
     return { reason: "runtime_db_admin_url_invalid", detail: "use_direct_db_host_not_pooler" };
@@ -58,12 +60,15 @@ function mapStoreConnectFailure(error: unknown): { reason: string; detail?: stri
     return { reason: "runtime_db_admin_auth_failed", detail: "check_admin_db_password" };
   }
 
-  if (message.includes("getaddrinfo") || message.includes("enotfound") || message.includes("timed out")) {
+  if (message.includes("getaddrinfo") || message.includes("enotfound") || message.includes("timed out") || message.includes("etimedout")) {
     return { reason: "runtime_db_admin_unreachable", detail: "check_db_host_network_dns" };
   }
 
   if (message.includes("runtime db provisioning failed at")) {
-    return { reason: "runtime_db_provision_failed", detail: "check_runner_logs_for_stage" };
+    return {
+      reason: "runtime_db_provision_failed",
+      detail: stage ? `failed_at_${stage}` : "check_runner_logs_for_stage"
+    };
   }
 
   if (message.includes("runtime database") || message.includes("runtime db") || message.includes("provision")) {
