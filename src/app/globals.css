@@ -1573,6 +1573,16 @@ html[data-theme="dark"] .block-chip {
   gap: 8px;
 }
 
+.workspace-v3-shopify-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.workspace-v3-project-logs {
+  min-height: calc(100vh - 190px);
+}
+
 .workspace-v3-db-studio {
   min-height: calc(100vh - 250px);
   border: 1px solid rgba(77, 96, 120, 0.42);
@@ -1698,7 +1708,7 @@ html[data-theme="dark"] .block-chip {
   .workspace-v3-tabs {
     border-right: 0;
     border-bottom: 1px solid rgba(77, 96, 120, 0.4);
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 6px;
   }
 
@@ -1708,6 +1718,10 @@ html[data-theme="dark"] .block-chip {
   }
 
   .workspace-v3-db-studio {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-v3-shopify-grid {
     grid-template-columns: 1fr;
   }
 

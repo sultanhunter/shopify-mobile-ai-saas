@@ -4,14 +4,14 @@ import Image from "next/image";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { DevSessionState, PublicProject } from "@/lib/models";
+import { ChatMessage, DevSessionState, PublicProject } from "@/lib/models";
 
 interface WorkspaceClientProps {
   initialProject: PublicProject;
 }
 
 type ThinkingMode = "low" | "medium" | "high" | "xHigh";
-type WorkspaceTab = "preview" | "mobile" | "backend" | "database";
+type WorkspaceTab = "preview" | "mobile" | "backend" | "database" | "shopify";
 
 interface DatabaseColumn {
   name: string;
@@ -48,6 +48,15 @@ function renderCellValue(value: unknown): string {
   }
 
   return JSON.stringify(value);
+}
+
+function formatProjectLogLine(message: ChatMessage): string {
+  const time = new Date(message.createdAt).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+
+  return `[${time}] ${message.content}`;
 }
 
 export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
@@ -94,6 +103,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const expoBackendLogs = devSession?.expoBackendLogs ?? devSession?.backendLogs;
   const expoBackendStatus = devSession?.expoBackendStatus ?? devSession?.backendStatus;
   const expoBackendUrl = devSession?.expoBackendUrl ?? devSession?.backendUrl;
+  const projectLogLines = useMemo(() => project.messages.map(formatProjectLogLine).slice(-160), [project.messages]);
 
   const expoQrUrl = useMemo(() => {
     if (!devSession?.expoUrl || devSession.status !== "ready") {
@@ -506,6 +516,10 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
               <span className="tool-tab-glyph">DB</span>
               <span>Database</span>
             </button>
+            <button className={`tool-tab ${activeTab === "shopify" ? "tool-tab-active" : ""}`} onClick={() => setActiveTab("shopify")} type="button">
+              <span className="tool-tab-glyph">SH</span>
+              <span>Shopify Store</span>
+            </button>
           </nav>
 
           <div className="workspace-v3-panel">
@@ -550,49 +564,6 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
             {activeTab === "database" ? (
               <div className="workspace-v3-db-wrap">
-                <div className="run-meta workspace-v3-store-card">
-                  <label className="field-label" htmlFor="storeDomainInput">
-                    Shopify Store Domain
-                  </label>
-                  <input
-                    id="storeDomainInput"
-                    className="text-input"
-                    placeholder="your-shop.myshopify.com"
-                    value={storeDomain}
-                    onChange={(event) => setStoreDomain(event.target.value)}
-                  />
-                  <button className="button" disabled={isConnectingStore} onClick={connectStoreWithOAuth} type="button">
-                    {isConnectingStore ? "Redirecting..." : "Connect via OAuth"}
-                  </button>
-                  {oauthStatus === "success" ? <p className="meta-line">Shopify OAuth connected{oauthShop ? `: ${oauthShop}` : ""}.</p> : null}
-                  {oauthStatus === "error" ? (
-                    <p className="error-text">
-                      Shopify OAuth failed{oauthReason ? ` (${oauthReason.replaceAll("_", " ")})` : ""}
-                      {oauthDetail ? ` - ${oauthDetail.replaceAll("_", " ")}` : ""}. Try again.
-                    </p>
-                  ) : null}
-                  {customerAuth ? (
-                    <>
-                      <p className="meta-line">Customer Account API client ID: {customerApiHasClientId ? "configured" : "missing"}</p>
-                      <input
-                        className="text-input"
-                        placeholder="Customer Account API client ID"
-                        value={customerClientIdInput}
-                        onChange={(event) => setCustomerClientIdInput(event.target.value)}
-                      />
-                      <button
-                        className="button"
-                        type="button"
-                        disabled={isSavingCustomerClientId || !customerClientIdInput.trim()}
-                        onClick={saveCustomerClientId}
-                      >
-                        {isSavingCustomerClientId ? "Saving..." : "Save Customer Client ID"}
-                      </button>
-                    </>
-                  ) : null}
-                  {customerClientIdFeedback ? <p className="meta-line">{customerClientIdFeedback}</p> : null}
-                </div>
-
                 <div className="workspace-v3-db-studio">
                   <aside className="workspace-v3-db-sidebar">
                     <div className="workspace-v3-db-sidebar-head">
@@ -665,6 +636,61 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
                       </table>
                     </div>
                   </section>
+                </div>
+              </div>
+            ) : null}
+
+            {activeTab === "shopify" ? (
+              <div className="workspace-v3-shopify-grid">
+                <div className="run-meta workspace-v3-store-card">
+                  <label className="field-label" htmlFor="storeDomainInput">
+                    Shopify Store Domain
+                  </label>
+                  <input
+                    id="storeDomainInput"
+                    className="text-input"
+                    placeholder="your-shop.myshopify.com"
+                    value={storeDomain}
+                    onChange={(event) => setStoreDomain(event.target.value)}
+                  />
+                  <button className="button" disabled={isConnectingStore} onClick={connectStoreWithOAuth} type="button">
+                    {isConnectingStore ? "Redirecting..." : "Connect via OAuth"}
+                  </button>
+                  {oauthStatus === "success" ? <p className="meta-line">Shopify OAuth connected{oauthShop ? `: ${oauthShop}` : ""}.</p> : null}
+                  {oauthStatus === "error" ? (
+                    <p className="error-text">
+                      Shopify OAuth failed{oauthReason ? ` (${oauthReason.replaceAll("_", " ")})` : ""}
+                      {oauthDetail ? ` - ${oauthDetail.replaceAll("_", " ")}` : ""}. Try again.
+                    </p>
+                  ) : null}
+                  {customerAuth ? <p className="meta-line">Customer auth method: {customerAuth.activeMethod}</p> : null}
+                  {customerAuth ? <p className="meta-line">Customer Account API client ID: {customerApiHasClientId ? "configured" : "missing"}</p> : null}
+                  {customerAuth ? (
+                    <>
+                      <input
+                        className="text-input"
+                        placeholder="Customer Account API client ID"
+                        value={customerClientIdInput}
+                        onChange={(event) => setCustomerClientIdInput(event.target.value)}
+                      />
+                      <button
+                        className="button"
+                        type="button"
+                        disabled={isSavingCustomerClientId || !customerClientIdInput.trim()}
+                        onClick={saveCustomerClientId}
+                      >
+                        {isSavingCustomerClientId ? "Saving..." : "Save Customer Client ID"}
+                      </button>
+                    </>
+                  ) : null}
+                  {customerClientIdFeedback ? <p className="meta-line">{customerClientIdFeedback}</p> : null}
+                </div>
+
+                <div className="run-meta workspace-v3-project-logs">
+                  <p className="section-kicker">Project logs</p>
+                  <div className="log-console workspace-v3-log">
+                    {projectLogLines.length > 0 ? projectLogLines.join("\n") : "No project logs yet."}
+                  </div>
                 </div>
               </div>
             ) : null}
