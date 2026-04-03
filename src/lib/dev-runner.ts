@@ -41,6 +41,12 @@ interface DevRunnerRuntimeDatabaseResponse {
   error?: string;
 }
 
+interface DevRunnerRuntimeStateUpsertResponse {
+  ok?: boolean;
+  appliedVersion?: number;
+  error?: string;
+}
+
 function getDevRunnerBaseUrl(): string {
   const baseUrl = process.env.RUNNER_SERVER_BASE_URL?.trim() || process.env.AI_SERVER_BASE_URL?.trim();
   if (!baseUrl) {
@@ -335,4 +341,30 @@ export async function provisionRuntimeDatabaseOnRunner(projectId: string): Promi
   }
 
   return runtimeDatabase;
+}
+
+export async function upsertRuntimeStateOnRunner(input: {
+  databaseUrl: string;
+  version: number;
+  config: Record<string, unknown>;
+  secrets: Record<string, unknown>;
+}): Promise<{ appliedVersion: number }> {
+  const response = await fetch(`${getDevRunnerBaseUrl()}/api/shopify-mobile/runtime-db/state-upsert`, {
+    method: "POST",
+    headers: buildHeaders(),
+    body: JSON.stringify({
+      databaseUrl: input.databaseUrl,
+      version: input.version,
+      config: input.config,
+      secrets: input.secrets
+    })
+  });
+
+  const payload = await parseJson<DevRunnerRuntimeStateUpsertResponse>(response);
+  const appliedVersion = typeof payload?.appliedVersion === "number" ? payload.appliedVersion : undefined;
+  if (!response.ok || appliedVersion === undefined) {
+    throw new Error(await buildUpstreamError(response, "Failed to upsert runtime state on runner", payload?.error));
+  }
+
+  return { appliedVersion };
 }

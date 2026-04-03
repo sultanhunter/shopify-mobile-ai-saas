@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Pool } from "pg";
 import { getProject, listProjects, updateProject } from "@/lib/db";
 import {
   applyFilesToProjectRepo,
@@ -6,12 +7,14 @@ import {
   getDevRunnerSessionStatus,
   listProjectRepoFiles,
   startDevRunnerSession,
-  stopDevRunnerSession
+  stopDevRunnerSession,
+  upsertRuntimeStateOnRunner
 } from "@/lib/dev-runner";
 import { renderShopifyBaselineFiles, validateShopifyBaselineFiles } from "@/lib/shopify-baseline";
 import { detectCustomerAuthState } from "@/lib/shopify-customer-auth";
 import {
   dispatchProjectRuntimeSync,
+  getProjectRuntimeSnapshot,
   getProjectRuntimeSecrets,
   upsertAndQueueProjectRuntimeSync
 } from "@/lib/runtime-sync";
@@ -31,6 +34,8 @@ import { provisionRuntimeProjectDatabase } from "@/lib/runtime-db-provisioning";
 import { parseRuntimeSecrets } from "@/lib/runtime-secrets";
 
 const CLIENT_ID_CONFIGURED_SENTINEL = "__configured__";
+const START_SYNC_POLL_ATTEMPTS = 8;
+const START_SYNC_POLL_DELAY_MS = 1500;
 
 function createAssistantMessage(content: string, runId?: string): ChatMessage {
   return {
@@ -40,6 +45,141 @@ function createAssistantMessage(content: string, runId?: string): ChatMessage {
     createdAt: new Date().toISOString(),
     runId
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolveRuntimeBackendBaseUrl(session: DevSessionState | undefined): string | undefined {
+  return session?.expoBackendUrl ?? session?.backendUrl;
+}
+
+async function dispatchRuntimeSyncForSession(projectId: string, session: DevSessionState | undefined): Promise<number> {
+  const baseUrl = resolveRuntimeBackendBaseUrl(session);
+  if (!baseUrl) {
+    return 0;
+  }
+
+  const delivered = await dispatchProjectRuntimeSync({
+    projectId,
+    expoBackendBaseUrl: baseUrl,
+  });
+
+  return delivered.delivered;
+}
+
+async function waitForRuntimeBackendAndDispatchSync(input: {
+  projectId: string;
+  sessionId: string;
+  initialSession: DevSessionState;
+}): Promise<DevSessionState> {
+  let currentSession = input.initialSession;
+
+  try {
+    const deliveredNow = await dispatchRuntimeSyncForSession(input.projectId, currentSession);
+    if (deliveredNow > 0 || resolveRuntimeBackendBaseUrl(currentSession)) {
+      return currentSession;
+    }
+  } catch {
+    // Retry via status polling.
+  }
+
+  for (let attempt = 0; attempt < START_SYNC_POLL_ATTEMPTS; attempt += 1) {
+    await sleep(START_SYNC_POLL_DELAY_MS);
+
+    try {
+      const refreshed = await getDevRunnerSessionStatus(input.sessionId, 60);
+      currentSession = normalizeDevSessionState(refreshed);
+    } catch {
+      continue;
+    }
+
+    const baseUrl = resolveRuntimeBackendBaseUrl(currentSession);
+    if (!baseUrl) {
+      continue;
+    }
+
+    try {
+      await dispatchRuntimeSyncForSession(input.projectId, currentSession);
+    } catch {
+      // Keep session update even if sync failed.
+    }
+
+    return currentSession;
+  }
+
+  return currentSession;
+}
+
+function isRunnerLocalDatabaseUrl(databaseUrl: string): boolean {
+  try {
+    const parsed = new URL(databaseUrl);
+    return parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "::1";
+  } catch {
+    return databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1");
+  }
+}
+
+function createRuntimeDatabasePool(databaseUrl: string): Pool {
+  const isLocal = isRunnerLocalDatabaseUrl(databaseUrl);
+  return new Pool({
+    connectionString: databaseUrl,
+    max: 1,
+    ssl: isLocal ? undefined : { rejectUnauthorized: false }
+  });
+}
+
+async function upsertRuntimeStateDirect(params: {
+  databaseUrl: string;
+  version: number;
+  config: Record<string, unknown>;
+  secrets: Record<string, unknown>;
+}): Promise<void> {
+  const pool = createRuntimeDatabasePool(params.databaseUrl);
+
+  try {
+    await pool.query(
+      "create table if not exists runtime_sync_state (id text primary key, version bigint not null default 0, config_json jsonb not null default '{}'::jsonb, secrets_json jsonb not null default '{}'::jsonb, updated_at timestamptz not null default now())"
+    );
+    await pool.query(
+      "insert into runtime_sync_state (id, version, config_json, secrets_json) values ($1, $2, $3::jsonb, $4::jsonb) on conflict (id) do update set version = excluded.version, config_json = excluded.config_json, secrets_json = excluded.secrets_json, updated_at = now()",
+      ["runtime", params.version, JSON.stringify(params.config), JSON.stringify(params.secrets)]
+    );
+  } finally {
+    await pool.end();
+  }
+}
+
+async function seedRuntimeStateInProjectDatabase(projectId: string): Promise<void> {
+  const snapshot = await getProjectRuntimeSnapshot(projectId);
+  if (!snapshot) {
+    return;
+  }
+
+  const runtimeSecrets = parseRuntimeSecrets(snapshot.secrets);
+  const databaseUrl = runtimeSecrets.runtime?.database?.databaseUrl?.trim();
+  if (!databaseUrl) {
+    return;
+  }
+
+  const payload = {
+    databaseUrl,
+    version: snapshot.version,
+    config: snapshot.config,
+    secrets: snapshot.secrets
+  };
+
+  if (isRunnerLocalDatabaseUrl(databaseUrl)) {
+    await upsertRuntimeStateOnRunner(payload);
+    return;
+  }
+
+  try {
+    await upsertRuntimeStateDirect(payload);
+  } catch {
+    await upsertRuntimeStateOnRunner(payload);
+  }
 }
 
 function normalizeWorkspaceDir(value: string | undefined, fallback: string): string {
@@ -398,6 +538,10 @@ export async function connectStoreToProject(params: {
       }
     });
 
+    stage = "seed_runtime_state_db";
+    await appendProjectOperationMessage(project.id, "Store setup: writing runtime state into the project database...");
+    await seedRuntimeStateInProjectDatabase(project.id);
+
     await appendProjectOperationMessage(project.id, "Store setup: runtime config and secrets synced.");
 
     stage = "persist_store_connection";
@@ -612,6 +756,8 @@ export async function startProjectDevSession(
         secrets: runtimeDatabasePatch
       });
     }
+
+    await seedRuntimeStateInProjectDatabase(project.id);
   } catch (error) {
     if (project.store?.connectedAt) {
       throw error instanceof Error
@@ -638,15 +784,21 @@ export async function startProjectDevSession(
   });
 
   const normalized = normalizeDevSessionState(session);
+  const sessionWithSyncAttempt = await waitForRuntimeBackendAndDispatchSync({
+    projectId: project.id,
+    sessionId: normalized.id,
+    initialSession: normalized
+  });
+
   const updated = await updateProject(project.id, (current) => ({
     ...current,
     updatedAt: new Date().toISOString(),
     workspaceLayout: current.workspaceLayout ?? workspaceLayout,
-    devSession: normalized,
+    devSession: sessionWithSyncAttempt,
     messages: [
       ...current.messages,
       createAssistantMessage(
-        `Dev session started (${normalized.id}) for mobile (${workspaceLayout.mobileAppDir}) and expo backend (${workspaceLayout.expoBackendDir}). Waiting for URLs...`
+        `Dev session started (${normalized.id}) for mobile (${workspaceLayout.mobileAppDir}) and expo backend (${workspaceLayout.expoBackendDir}).`
       )
     ]
   }));
@@ -655,18 +807,9 @@ export async function startProjectDevSession(
     throw new Error("Project not found");
   }
 
-  try {
-    await dispatchProjectRuntimeSync({
-      projectId: updated.id,
-      expoBackendBaseUrl: normalized.expoBackendUrl ?? normalized.backendUrl,
-    });
-  } catch {
-    // Runtime sync can be retried on next refresh.
-  }
-
   return {
     project: toPublicProject(updated),
-    devSession: normalized,
+    devSession: sessionWithSyncAttempt,
   };
 }
 

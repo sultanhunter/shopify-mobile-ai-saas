@@ -11,7 +11,8 @@ interface WorkspaceClientProps {
 }
 
 type ThinkingMode = "low" | "medium" | "high" | "xHigh";
-type WorkspaceTab = "preview" | "mobile" | "backend" | "database" | "shopify";
+type WorkspaceTab = "preview" | "code" | "mobile" | "backend" | "database" | "shopify";
+type CodeScope = "mobile" | "backend";
 
 interface DatabaseColumn {
   name: string;
@@ -50,6 +51,23 @@ function renderCellValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function normalizeWorkspaceDir(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === "." || trimmed === "./") {
+    return ".";
+  }
+
+  return trimmed.replace(/^\.\//, "").replace(/\/$/, "") || fallback;
+}
+
+function isFileInsideDir(filePath: string, dir: string): boolean {
+  if (dir === ".") {
+    return true;
+  }
+
+  return filePath === dir || filePath.startsWith(`${dir}/`);
+}
+
 function formatProjectLogLine(message: ChatMessage): string {
   const time = new Date(message.createdAt).toLocaleTimeString([], {
     hour: "2-digit",
@@ -79,6 +97,13 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const [customerClientIdInput, setCustomerClientIdInput] = useState("");
   const [isSavingCustomerClientId, setIsSavingCustomerClientId] = useState(false);
   const [customerClientIdFeedback, setCustomerClientIdFeedback] = useState<string | null>(null);
+  const [repoFiles, setRepoFiles] = useState<string[]>(initialProject.fileIndex ?? []);
+  const [codeScope, setCodeScope] = useState<CodeScope>("mobile");
+  const [selectedCodeFile, setSelectedCodeFile] = useState("");
+  const [isLoadingCode, setIsLoadingCode] = useState(false);
+  const [codeError, setCodeError] = useState<string | null>(null);
+  const [codeContent, setCodeContent] = useState("");
+  const [isBinaryCode, setIsBinaryCode] = useState(false);
 
   const [dbLoading, setDbLoading] = useState(false);
   const [dbError, setDbError] = useState<string | null>(null);
@@ -104,6 +129,30 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   const expoBackendStatus = devSession?.expoBackendStatus ?? devSession?.backendStatus;
   const expoBackendUrl = devSession?.expoBackendUrl ?? devSession?.backendUrl;
   const projectLogLines = useMemo(() => project.messages.map(formatProjectLogLine).slice(-160), [project.messages]);
+  const mobileCodeRoot = useMemo(
+    () => normalizeWorkspaceDir(project.workspaceLayout?.mobileAppDir, "mobile"),
+    [project.workspaceLayout?.mobileAppDir]
+  );
+  const backendCodeRoot = useMemo(
+    () => normalizeWorkspaceDir(project.workspaceLayout?.expoBackendDir ?? project.workspaceLayout?.backendDir, "expo-backend"),
+    [project.workspaceLayout?.expoBackendDir, project.workspaceLayout?.backendDir]
+  );
+
+  const visibleCodeFiles = useMemo(() => {
+    if (codeScope === "mobile") {
+      if (mobileCodeRoot === ".") {
+        return repoFiles.filter((filePath) => !isFileInsideDir(filePath, backendCodeRoot));
+      }
+
+      return repoFiles.filter((filePath) => isFileInsideDir(filePath, mobileCodeRoot));
+    }
+
+    if (backendCodeRoot === ".") {
+      return repoFiles;
+    }
+
+    return repoFiles.filter((filePath) => isFileInsideDir(filePath, backendCodeRoot));
+  }, [backendCodeRoot, codeScope, mobileCodeRoot, repoFiles]);
 
   const expoQrUrl = useMemo(() => {
     if (!devSession?.expoUrl || devSession.status !== "ready") {
@@ -121,6 +170,20 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
     }
 
     setProject(payload.project);
+  }, [project.id]);
+
+  const refreshRepoFiles = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/projects/${project.id}/files`, { cache: "no-store" });
+      const payload = (await response.json().catch(() => null)) as { files?: string[] } | null;
+      if (!response.ok || !Array.isArray(payload?.files)) {
+        return;
+      }
+
+      setRepoFiles(payload.files);
+    } catch {
+      // Keep current file list.
+    }
   }, [project.id]);
 
   const refreshDatabaseExplorer = useCallback(
@@ -203,12 +266,87 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
   }, [devSession, refreshDevSession]);
 
   useEffect(() => {
+    void refreshRepoFiles();
+  }, [refreshRepoFiles]);
+
+  useEffect(() => {
     if (activeTab !== "database") {
       return;
     }
 
     void refreshDatabaseExplorer();
   }, [activeTab, refreshDatabaseExplorer]);
+
+  useEffect(() => {
+    if (activeTab !== "code") {
+      return;
+    }
+
+    if (visibleCodeFiles.length === 0) {
+      setSelectedCodeFile("");
+      return;
+    }
+
+    if (!selectedCodeFile || !visibleCodeFiles.includes(selectedCodeFile)) {
+      setSelectedCodeFile(visibleCodeFiles[0]);
+    }
+  }, [activeTab, selectedCodeFile, visibleCodeFiles]);
+
+  useEffect(() => {
+    if (activeTab !== "code" || !selectedCodeFile) {
+      setCodeContent("");
+      setCodeError(null);
+      setIsBinaryCode(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      setIsLoadingCode(true);
+      setCodeError(null);
+
+      try {
+        const response = await fetch(`/api/projects/${project.id}/code?path=${encodeURIComponent(selectedCodeFile)}`, {
+          cache: "no-store"
+        });
+        const payload = (await response.json().catch(() => null)) as
+          | {
+              content?: string;
+              isBinary?: boolean;
+              error?: string;
+            }
+          | null;
+
+        if (!response.ok) {
+          throw new Error(payload?.error ?? "Failed to load file.");
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setIsBinaryCode(Boolean(payload?.isBinary));
+        setCodeContent(typeof payload?.content === "string" ? payload.content : "");
+      } catch (caught) {
+        if (cancelled) {
+          return;
+        }
+
+        setCodeError(caught instanceof Error ? caught.message : "Failed to load file.");
+        setCodeContent("");
+        setIsBinaryCode(false);
+      } finally {
+        if (!cancelled) {
+          setIsLoadingCode(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, project.id, selectedCodeFile]);
 
   async function connectStoreWithOAuth() {
     const normalizedDomain = storeDomain.trim();
@@ -504,6 +642,10 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
               <span className="tool-tab-glyph">PV</span>
               <span>Preview</span>
             </button>
+            <button className={`tool-tab ${activeTab === "code" ? "tool-tab-active" : ""}`} onClick={() => setActiveTab("code")} type="button">
+              <span className="tool-tab-glyph">CD</span>
+              <span>Code</span>
+            </button>
             <button className={`tool-tab ${activeTab === "mobile" ? "tool-tab-active" : ""}`} onClick={() => setActiveTab("mobile")} type="button">
               <span className="tool-tab-glyph">MB</span>
               <span>Expo Mobile</span>
@@ -525,6 +667,38 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
           <div className="workspace-v3-panel">
             {activeTab === "preview" ? (
               <div className="workspace-v3-preview-only">{expoQrUrl ? <Image alt="Expo Go QR code" className="expo-qr" height={260} src={expoQrUrl} width={260} /> : null}</div>
+            ) : null}
+
+            {activeTab === "code" ? (
+              <div className="run-meta">
+                <div className="inline-grid">
+                  <button className="button" onClick={() => setCodeScope("mobile")} type="button">
+                    Expo Mobile Code
+                  </button>
+                  <button className="button" onClick={() => setCodeScope("backend")} type="button">
+                    Expo Backend Code
+                  </button>
+                </div>
+                <button className="toolbar-button" onClick={() => void refreshRepoFiles()} type="button">
+                  Refresh Files
+                </button>
+                <select className="text-input" disabled={visibleCodeFiles.length === 0} value={selectedCodeFile} onChange={(event) => setSelectedCodeFile(event.target.value)}>
+                  {visibleCodeFiles.length === 0 ? <option value="">No files found</option> : null}
+                  {visibleCodeFiles.map((filePath) => (
+                    <option key={filePath} value={filePath}>
+                      {filePath}
+                    </option>
+                  ))}
+                </select>
+                {codeError ? <p className="error-text">{codeError}</p> : null}
+                <div className="log-console workspace-v3-code-view">
+                  {isLoadingCode
+                    ? "Loading file..."
+                    : isBinaryCode
+                      ? "Binary file preview is not supported."
+                      : codeContent || "No file selected."}
+                </div>
+              </div>
             ) : null}
 
             {activeTab === "mobile" ? (

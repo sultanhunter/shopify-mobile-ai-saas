@@ -1563,6 +1563,11 @@ html[data-theme="dark"] .block-chip {
   max-height: 65vh;
 }
 
+.workspace-v3-code-view {
+  min-height: 520px;
+  max-height: 70vh;
+}
+
 .workspace-v3-db-wrap {
   display: grid;
   gap: 12px;
@@ -1708,7 +1713,7 @@ html[data-theme="dark"] .block-chip {
   .workspace-v3-tabs {
     border-right: 0;
     border-bottom: 1px solid rgba(77, 96, 120, 0.4);
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 6px;
   }
 
