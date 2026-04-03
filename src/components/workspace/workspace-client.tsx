@@ -4,6 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { ChatMessage, DevSessionState, PublicProject } from "@/lib/models";
 
 interface WorkspaceClientProps {
@@ -597,14 +598,27 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
     <div className="workspace-shell">
       <section className="chat-column">
         <div className="panel-head">
-          <Link className="back-link" href="/">
-            Back to projects
-          </Link>
+          <div className="panel-head-top">
+            <Link className="back-link" href="/">
+              Back to projects
+            </Link>
+            <div className="workspace-head-tools">
+              <p className="workspace-id">Workspace {project.id.slice(0, 8)}</p>
+              <ThemeToggle />
+            </div>
+          </div>
           <h1 className="panel-title">{project.name}</h1>
-          <p className="panel-subtitle">AI chat with streaming responses via OpenCode.</p>
+          <p className="panel-subtitle">AI co-builder with runtime sync, Expo backend control, and live operational logs.</p>
+          <div className="status-row">
+            <span className="status-tag">Expo SDK {project.expoSdk ?? "unknown"}</span>
+            <span className="status-tag">Session {devSession?.status ?? "idle"}</span>
+            <span className="status-tag">Store {project.store?.connectedAt ? "connected" : "pending"}</span>
+            <span className="status-tag">Files {repoFiles.length}</span>
+          </div>
         </div>
 
         <div className="connect-row">
+          <p className="section-kicker">Store connection</p>
           <label className="field-label" htmlFor="storeDomainInput">
             Shopify Store Domain
           </label>
@@ -684,7 +698,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
             )}
           </div>
 
-          <div className="run-meta live-stream-panel">
+          <div className={`run-meta live-stream-panel ${isSendingPrompt ? "streaming-active" : ""}`}>
             <h3>Live AI Stream</h3>
             <div className="log-console live-stream-console">
               {liveStreamLines.length > 0 ? liveStreamLines.join("\n\n") : "Awaiting streamed response..."}
@@ -699,24 +713,26 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
             onChange={(event) => setPrompt(event.target.value)}
             placeholder="Build a Shopify loyalty flow with points wallet and order tracking timeline."
           />
-          <select className="text-input" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}>
-            {LLM_MODEL_OPTIONS.map((model) => (
-              <option key={model} value={model}>
-                {model}
-              </option>
-            ))}
-          </select>
-          <select
-            className="text-input"
-            value={selectedThinking}
-            onChange={(event) => setSelectedThinking(event.target.value as ThinkingMode)}
-          >
-            {THINKING_MODE_OPTIONS.map((mode) => (
-              <option key={mode} value={mode}>
-                {`Thinking: ${mode}`}
-              </option>
-            ))}
-          </select>
+          <div className="composer-controls">
+            <select className="text-input" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}>
+              {LLM_MODEL_OPTIONS.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+            <select
+              className="text-input"
+              value={selectedThinking}
+              onChange={(event) => setSelectedThinking(event.target.value as ThinkingMode)}
+            >
+              {THINKING_MODE_OPTIONS.map((mode) => (
+                <option key={mode} value={mode}>
+                  {`Thinking: ${mode}`}
+                </option>
+              ))}
+            </select>
+          </div>
           {error ? <p className="error-text">{error}</p> : null}
           <button className="button" disabled={isSendingPrompt} type="submit">
             {isSendingPrompt ? "Streaming..." : "Send Prompt"}
@@ -726,6 +742,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
 
       <aside className="preview-column">
         <div className="run-meta">
+          <p className="section-kicker">Runtime controls</p>
           <h3>Global Console</h3>
           <p className="meta-line">Status: {devSession ? getDevSessionStatusLabel(devSession) : "not running"}</p>
           {(devSession?.expoBackendStatus ?? devSession?.backendStatus) ? (
@@ -738,7 +755,7 @@ export function WorkspaceClient({ initialProject }: WorkspaceClientProps) {
           ) : null}
           <div className="inline-grid">
             <button className="button" disabled={isStartingDevSession || hasActiveDevSession} onClick={startDevSession} type="button">
-              {isStartingDevSession ? "Starting..." : "Start"}
+              {isStartingDevSession ? "Starting..." : "Start Session"}
             </button>
             <button
               className="button"

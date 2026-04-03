@@ -185,8 +185,12 @@ export function ProjectCreateForm() {
   }
 
   return (
-    <form className="card" onSubmit={onSubmit}>
-      <h2 className="form-title">Create A New Builder Workspace</h2>
+    <form className="card create-card" onSubmit={onSubmit}>
+      <p className="section-kicker">New workspace</p>
+      <h2 className="form-title">Create a high-fidelity Shopify mobile app workspace</h2>
+      <p className="muted">
+        We scaffold <code>mobile/</code> + <code>expo-backend/</code>, initialize runtime sync, and prepare GitHub flow.
+      </p>
       <label className="field-label" htmlFor="projectName">
         Project Name
       </label>
@@ -212,7 +216,7 @@ export function ProjectCreateForm() {
         AI context, and can auto-create a GitHub repo.
       </p>
       {error ? <p className="error-text">{error}</p> : null}
-      {taskStatus ? <p className="meta-line">Task: {taskStatus}</p> : null}
+      {taskStatus ? <p className="meta-line meta-highlight">Task: {taskStatus}</p> : null}
       <button className="button" disabled={isSubmitting} type="submit">
         {isSubmitting ? "Creating..." : "Create Workspace"}
       </button>
