@@ -30,6 +30,16 @@ function buildWorkspaceRedirect(request: NextRequest, params: {
   return url;
 }
 
+function mapStoreConnectFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+
+  if (message.includes("runtime database") || message.includes("runtime db") || message.includes("provision")) {
+    return "runtime_db_provision_failed";
+  }
+
+  return "store_connect_failed";
+}
+
 export async function GET(request: NextRequest) {
   const rawShop = request.nextUrl.searchParams.get("shop");
   const shop = rawShop ? normalizeShopDomain(rawShop) : null;
@@ -67,16 +77,29 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  let accessToken: string;
   try {
     const tokenResult = await exchangeShopifyAccessToken({
       shopDomain: shop,
       code
     });
+    accessToken = tokenResult.accessToken;
+  } catch {
+    return NextResponse.redirect(
+      buildWorkspaceRedirect(request, {
+        projectId: oauthState.projectId,
+        status: "error",
+        reason: "token_exchange_failed",
+        shop
+      })
+    );
+  }
 
+  try {
     await connectStoreToProject({
       projectId: oauthState.projectId,
       shopDomain: shop,
-      accessToken: tokenResult.accessToken
+      accessToken
     });
 
     return NextResponse.redirect(
@@ -86,12 +109,13 @@ export async function GET(request: NextRequest) {
         shop
       })
     );
-  } catch {
+  } catch (error) {
+    console.error("[SHOPIFY_CALLBACK_CONNECT_STORE_FAILED]", error);
     return NextResponse.redirect(
       buildWorkspaceRedirect(request, {
         projectId: oauthState.projectId,
         status: "error",
-        reason: "token_exchange_failed",
+        reason: mapStoreConnectFailureReason(error),
         shop
       })
     );
