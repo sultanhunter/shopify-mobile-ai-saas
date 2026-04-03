@@ -92,6 +92,7 @@ export async function startDevRunnerSession(input: {
   projectId: string;
   repoUrl: string;
   controlPlaneBaseUrl?: string;
+  runtimeDatabaseUrl?: string;
   branch?: string;
   install?: boolean;
   useTunnel?: boolean;
@@ -121,6 +122,7 @@ export async function startDevRunnerSession(input: {
 
   const normalizedPayload = {
     ...input,
+    runtimeDatabaseUrl: input.runtimeDatabaseUrl,
     backendDirectory: input.backendDirectory ?? input.expoBackendDirectory,
     backendPort: input.backendPort ?? input.expoBackendPort,
     backendStartCommand: input.backendStartCommand ?? input.expoBackendStartCommand,

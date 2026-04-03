@@ -746,9 +746,18 @@ export async function startProjectDevSession(
     throw new Error("GitHub repository is required before starting a dev session.");
   }
 
+  let runtimeDatabaseUrlForSession: string | undefined;
+
   try {
     const existingRuntimeSecrets = await getProjectRuntimeSecrets(project.id);
+    runtimeDatabaseUrlForSession = parseRuntimeSecrets(existingRuntimeSecrets).runtime?.database?.databaseUrl?.trim();
+
     const runtimeDatabasePatch = await buildRuntimeDatabaseSecretsPatch(project.id, existingRuntimeSecrets);
+    const patchedRuntimeDatabaseUrl = parseRuntimeSecrets(runtimeDatabasePatch).runtime?.database?.databaseUrl?.trim();
+    if (patchedRuntimeDatabaseUrl) {
+      runtimeDatabaseUrlForSession = patchedRuntimeDatabaseUrl;
+    }
+
     if (Object.keys(runtimeDatabasePatch).length > 0) {
       await upsertAndQueueProjectRuntimeSync({
         projectId: project.id,
@@ -758,6 +767,11 @@ export async function startProjectDevSession(
     }
 
     await seedRuntimeStateInProjectDatabase(project.id);
+
+    if (!runtimeDatabaseUrlForSession) {
+      const refreshedSecrets = await getProjectRuntimeSecrets(project.id);
+      runtimeDatabaseUrlForSession = parseRuntimeSecrets(refreshedSecrets).runtime?.database?.databaseUrl?.trim();
+    }
   } catch (error) {
     if (project.store?.connectedAt) {
       throw error instanceof Error
@@ -771,6 +785,7 @@ export async function startProjectDevSession(
   const session = await startDevRunnerSession({
     projectId: project.id,
     repoUrl: project.github.repoUrl,
+    runtimeDatabaseUrl: runtimeDatabaseUrlForSession,
     branch: "main",
     install: options?.install ?? true,
     useTunnel: options?.useTunnel ?? true,

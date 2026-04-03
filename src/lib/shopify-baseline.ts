@@ -749,6 +749,10 @@ export const runtimeConfig = {
 if (!runtimeConfig.projectId) {
   throw new Error("PROJECT_ID is required for expo backend.");
 }
+
+if (!runtimeConfig.databaseUrl) {
+  throw new Error("DATABASE_URL is required for expo backend runtime state.");
+}
 `;
 }
 
@@ -757,36 +761,8 @@ function renderRuntimeBackendRuntimeStateStore(): string {
 
 const STATE_ROW_ID = "runtime";
 
-let memoryState = {
-  version: 0,
-  config: {},
-  secrets: {}
-};
-
 let pool;
 let poolDatabaseUrl;
-
-function resolveRuntimeStateDatabaseUrl(config, candidateState) {
-  const fromConfig = typeof config?.databaseUrl === "string" ? config.databaseUrl.trim() : "";
-  if (fromConfig) {
-    return fromConfig;
-  }
-
-  const fromCandidate =
-    typeof candidateState?.secrets?.runtime?.database?.databaseUrl === "string"
-      ? candidateState.secrets.runtime.database.databaseUrl.trim()
-      : "";
-  if (fromCandidate) {
-    return fromCandidate;
-  }
-
-  const fromMemory =
-    typeof memoryState?.secrets?.runtime?.database?.databaseUrl === "string"
-      ? memoryState.secrets.runtime.database.databaseUrl.trim()
-      : "";
-
-  return fromMemory || undefined;
-}
 
 function createPool(databaseUrl) {
   return new Pool({
@@ -796,10 +772,10 @@ function createPool(databaseUrl) {
   });
 }
 
-function getPool(config, candidateState) {
-  const databaseUrl = resolveRuntimeStateDatabaseUrl(config, candidateState);
+function getPool(config) {
+  const databaseUrl = typeof config?.databaseUrl === "string" ? config.databaseUrl.trim() : "";
   if (!databaseUrl) {
-    return undefined;
+    throw new Error("DATABASE_URL is required for runtime state store.");
   }
 
   if (!pool || poolDatabaseUrl !== databaseUrl) {
@@ -821,19 +797,13 @@ async function ensureSchema(currentPool) {
 }
 
 export async function initRuntimeStateStore(config) {
-  const currentPool = getPool(config, memoryState);
-  if (!currentPool) {
-    return;
-  }
+  const currentPool = getPool(config);
 
   await ensureSchema(currentPool);
 }
 
 export async function getRuntimeState(config) {
-  const currentPool = getPool(config, memoryState);
-  if (!currentPool) {
-    return memoryState;
-  }
+  const currentPool = getPool(config);
 
   await ensureSchema(currentPool);
   const result = await currentPool.query(
@@ -869,15 +839,7 @@ export async function saveRuntimeState(config, nextState) {
     secrets: nextState.secrets ?? {}
   };
 
-  const currentPool = getPool(config, normalized);
-  if (!currentPool) {
-    if (normalized.version < memoryState.version) {
-      return memoryState;
-    }
-
-    memoryState = normalized;
-    return memoryState;
-  }
+  const currentPool = getPool(config);
 
   await ensureSchema(currentPool);
   const current = await getRuntimeState(config);
@@ -1091,21 +1053,18 @@ function createPool(databaseUrl) {
   });
 }
 
-function getRuntimeDatabaseUrl(runtimeState) {
-  const runtimeSecrets = asRecord(runtimeState?.secrets);
-  const runtime = asRecord(runtimeSecrets.runtime);
-  const database = asRecord(runtime.database);
-  const databaseUrl = typeof database.databaseUrl === "string" ? database.databaseUrl.trim() : "";
+function getRuntimeDatabaseUrl(config) {
+  const databaseUrl = typeof config?.databaseUrl === "string" ? config.databaseUrl.trim() : "";
 
   if (!databaseUrl) {
-    throw new Error("Runtime database URL is missing. Wait for control-plane runtime sync.");
+    throw new Error("DATABASE_URL is required for runtime customer auth storage.");
   }
 
   return databaseUrl;
 }
 
-async function getRuntimePool(runtimeState) {
-  const databaseUrl = getRuntimeDatabaseUrl(runtimeState);
+async function getRuntimePool(config) {
+  const databaseUrl = getRuntimeDatabaseUrl(config);
 
   if (!runtimePool || runtimePoolDatabaseUrl !== databaseUrl) {
     if (runtimePool) {
@@ -1351,7 +1310,7 @@ export function createCustomerAuthAdapter(config) {
     async start() {
       const runtimeState = await getRuntimeState(config);
       const shopify = getShopifySecrets(runtimeState);
-      const pool = await getRuntimePool(runtimeState);
+      const pool = await getRuntimePool(config);
 
       if (!shopify.shopDomain) {
         throw new Error("Shop domain is missing in runtime secrets.");
@@ -1400,8 +1359,7 @@ export function createCustomerAuthAdapter(config) {
       };
     },
     async getSession(sessionId) {
-      const runtimeState = await getRuntimeState(config);
-      const pool = await getRuntimePool(runtimeState);
+      const pool = await getRuntimePool(config);
 
       const result = await pool.query(
         "select id, status, code_verifier, token_payload_encrypted, error, expires_at, created_at, updated_at from customer_auth_sessions where id = $1 limit 1",
@@ -1472,7 +1430,7 @@ export function createCustomerAuthAdapter(config) {
     async completeFromCallback(input) {
       const runtimeState = await getRuntimeState(config);
       const shopify = getShopifySecrets(runtimeState);
-      const pool = await getRuntimePool(runtimeState);
+      const pool = await getRuntimePool(config);
 
       const sessionId = typeof input?.sessionId === "string" ? input.sessionId.trim() : "";
       if (!sessionId) {
@@ -2611,7 +2569,7 @@ export function renderShopifyBaselineFiles(input: ShopifyBaselineInput): Record<
     [toWorkspacePath(expoBackendDir, "src/adapters/customer-auth-adapter.js")]: renderRuntimeBackendCustomerAuthAdapter(),
     ".shopify-baseline.json": JSON.stringify(
       {
-        version: 4,
+        version: 5,
         appliedAt: new Date().toISOString(),
         shopDomain: input.shopDomain,
         mobileAppDir,
