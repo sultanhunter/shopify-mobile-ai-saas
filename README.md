@@ -49,6 +49,7 @@ External runner server endpoints (`Desktop/shopify-mobile-runner-server`):
 - `POST /api/shopify-mobile/dev-session/:sessionId/apply-and-push` - write files, commit, push
 - `POST /api/shopify-mobile/dev-session/:sessionId/stop` - stop Expo process
 - `ANY /api/shopify-mobile/dev-session/:sessionId/web/*` - reverse proxy to live Expo web session
+- `GET /api/shopify-mobile/runtime-db/health` - verify runner DB admin connectivity
 - `POST /api/shopify-mobile/runtime-db/provision` - provision per-project Postgres DB + role
 
 ## Expo Scaffold Source
